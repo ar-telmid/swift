@@ -581,23 +581,3 @@ SwiftP2PEngine is optimized for high-speed file transfers on local area networks
 *   **Extensible Design:** Standardize payload parsing via the TLV field system. Developers can register custom packet types and fields without changing the core connection or framing code.
 *   **True Peer-to-Peer:** Avoid server dependencies. Keep communication direct, private, and local.
 *   **Persistent TCP Connections:** Avoid the overhead of establishing new connections for every transfer. Use a single persistent connection for all communication.
-
----
-
-## License
-
-```
-Copyright 2026 Bouazza & Swift Contributors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
