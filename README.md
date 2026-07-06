@@ -57,7 +57,7 @@ Add the following dependency to your application or module-level `build.gradle` 
 
 ```groovy
 dependencies {
-    implementation 'com.github.ar-telmid:swift:e84652e501'
+    implementation 'com.github.ar-telmid:swift:2.0.1'
 }
 ```
 
