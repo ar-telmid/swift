@@ -1,6 +1,0 @@
-{
-  "name": "Custom Binary TCP Protocol Simulator",
-  "description": "An interactive playground, visualizer, and code explorer for a custom high-speed binary TCP protocol built from scratch in Python.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
