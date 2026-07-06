@@ -430,25 +430,38 @@ class Packet:
   },
   {
     name: "dispatcher.py",
-    description: "An event-driven packet router containing virtual handler methods for server and client implementations.",
-    code: `from packet import Packet
+    description: "An event-driven packet router containing virtual handler methods and the full, symmetric PeerDispatcher for identical bidirectional capabilities.",
+    code: `import os
+import time
+from typing import Dict
+from packet import Packet
 from packet_types import PacketType
+from field_reader import FieldReader
+from field_writer import FieldWriter
+from constants import (
+    KEY_DEVICE_NAME,
+    KEY_APP_NAME,
+    KEY_APP_VERSION,
+    KEY_PLATFORM,
+    KEY_PROTOCOL_VERSION,
+    KEY_TEXT_MESSAGE,
+    KEY_SENDER_NAME,
+    KEY_TRANSFER_ID,
+    KEY_FILE_NAME,
+    KEY_FILE_SIZE,
+    KEY_CHUNK_SIZE,
+    KEY_CHUNK_NUMBER,
+    KEY_BINARY_DATA
+)
 
 class Dispatcher:
     """
     Routes incoming packets to type-specific callback handler methods.
-    
-    This is an abstract/base dispatcher class. Real server or client implementations
-    subclass this to implement their specific application logic (e.g., printing chat
-    messages or saving file chunks to disk).
     """
 
     def dispatch(self, connection, packet: Packet) -> None:
         """
         Dispatches a packet to its designated callback.
-        
-        :param connection: The active Connection instance that received this packet
-        :param packet: The received Packet instance
         """
         try:
             pt = PacketType(packet.packet_type)
@@ -476,40 +489,188 @@ class Dispatcher:
             self.on_disconnect(connection, packet)
 
     def on_handshake(self, connection, packet: Packet) -> None:
-        """Called when a HANDSHAKE packet is received."""
         pass
 
     def on_handshake_ack(self, connection, packet: Packet) -> None:
-        """Called when a HANDSHAKE_ACK packet is received."""
         pass
 
     def on_text(self, connection, packet: Packet) -> None:
-        """Called when a TEXT packet is received."""
         pass
 
     def on_file_start(self, connection, packet: Packet) -> None:
-        """Called when a FILE_START packet is received."""
         pass
 
     def on_file_chunk(self, connection, packet: Packet) -> None:
-        """Called when a FILE_CHUNK packet is received."""
         pass
 
     def on_file_end(self, connection, packet: Packet) -> None:
-        """Called when a FILE_END packet is received."""
         pass
 
     def on_ping(self, connection, packet: Packet) -> None:
-        """Called when a PING packet is received."""
         pass
 
     def on_pong(self, connection, packet: Packet) -> None:
-        """Called when a PONG packet is received."""
         pass
 
     def on_disconnect(self, connection, packet: Packet) -> None:
-        """Called when a DISCONNECT packet is received."""
         pass
+
+
+class ActiveTransfer:
+    """Tracks file download states on a peer."""
+    def __init__(self, transfer_id: int, file_name: str, file_size: int, chunk_size: int, node_name: str):
+        self.transfer_id = transfer_id
+        self.file_name = os.path.basename(file_name)
+        self.file_size = file_size
+        self.chunk_size = chunk_size
+        self.bytes_received = 0
+        self.chunks_received = 0
+        self.file_ref = None
+        self.node_name = node_name
+
+
+class PeerDispatcher(Dispatcher):
+    """
+    Symmetric peer-to-peer packet dispatcher.
+    Handles packets identically on both sides of the connection, perfectly supporting P2P.
+    """
+
+    def __init__(self, node_name: str = "Peer"):
+        super().__init__()
+        self.node_name = node_name
+        self.active_transfers: Dict[int, ActiveTransfer] = {}
+        os.makedirs("received_files", exist_ok=True)
+
+    def on_handshake(self, connection, packet: Packet) -> None:
+        try:
+            reader = FieldReader(packet.payload)
+            dev_name = reader.get_string(KEY_DEVICE_NAME)
+            app_name = reader.get_string(KEY_APP_NAME)
+            app_ver = reader.get_string(KEY_APP_VERSION)
+            platform = reader.get_string(KEY_PLATFORM)
+            proto_ver = reader.get_short(KEY_PROTOCOL_VERSION)
+
+            print(f"\\n[{self.node_name}] Received HANDSHAKE from remote peer:")
+            print(f"  Device: {dev_name} ({platform})")
+            print(f"  App: {app_name} v{app_ver}")
+            print(f"  Protocol Version: {proto_ver}")
+
+            # Send HANDSHAKE_ACK back
+            writer = FieldWriter()
+            writer.write_boolean(0x01, True)
+            writer.write_string(0x02, f"Approved by {self.node_name}")
+            
+            ack_packet = Packet(PacketType.HANDSHAKE_ACK, writer.get_bytes())
+            connection.send_packet(ack_packet)
+            print(f"[{self.node_name}] Returned HANDSHAKE_ACK.")
+        except Exception as e:
+            print(f"[{self.node_name}] Handshake parsing failed: {e}")
+            connection.close()
+
+    def on_handshake_ack(self, connection, packet: Packet) -> None:
+        try:
+            reader = FieldReader(packet.payload)
+            success = reader.get_boolean(0x01, default=False)
+            message = reader.get_string(0x02, default="No message")
+            status_str = "APPROVED" if success else "REJECTED"
+            print(f"\\n[{self.node_name}] Handshake {status_str}! Remote message: {message}")
+        except Exception as e:
+            print(f"[{self.node_name}] Error reading handshake ack: {e}")
+
+    def on_text(self, connection, packet: Packet) -> None:
+        try:
+            reader = FieldReader(packet.payload)
+            sender = reader.get_string(KEY_SENDER_NAME, default="Unknown Peer")
+            message = reader.get_string(KEY_TEXT_MESSAGE)
+            print(f"\\n[{self.node_name} Message] {sender}: {message}")
+        except Exception as e:
+            print(f"[{self.node_name}] Error parsing text packet: {e}")
+
+    def on_file_start(self, connection, packet: Packet) -> None:
+        try:
+            reader = FieldReader(packet.payload)
+            transfer_id = reader.get_int(KEY_TRANSFER_ID)
+            file_name = reader.get_string(KEY_FILE_NAME)
+            file_size = reader.get_long(KEY_FILE_SIZE)
+            chunk_size = reader.get_int(KEY_CHUNK_SIZE)
+
+            print(f"\\n[{self.node_name}] Incoming File Stream:")
+            print(f"  Transfer ID: {transfer_id}")
+            print(f"  File Name: {file_name}")
+            print(f"  Total Size: {file_size} bytes")
+            print(f"  Chunk Size: {chunk_size} bytes")
+
+            transfer = ActiveTransfer(transfer_id, file_name, file_size, chunk_size, self.node_name)
+            save_path = os.path.join("received_files", f"{self.node_name}_{transfer.file_name}")
+            
+            transfer.file_ref = open(save_path, "wb")
+            self.active_transfers[transfer_id] = transfer
+            print(f"[{self.node_name}] File created at: {save_path}. Waiting for chunks...")
+        except Exception as e:
+            print(f"[{self.node_name}] Error initiating file download: {e}")
+
+    def on_file_chunk(self, connection, packet: Packet) -> None:
+        try:
+            reader = FieldReader(packet.payload)
+            transfer_id = reader.get_int(KEY_TRANSFER_ID)
+            chunk_num = reader.get_int(KEY_CHUNK_NUMBER)
+            binary_data = reader.get_bytes(KEY_BINARY_DATA)
+
+            if transfer_id not in self.active_transfers:
+                print(f"\\n[{self.node_name}] Error: Chunk received for inactive transfer ID {transfer_id}")
+                return
+
+            transfer = self.active_transfers[transfer_id]
+            if transfer.file_ref:
+                transfer.file_ref.write(binary_data)
+                transfer.bytes_received += len(binary_data)
+                transfer.chunks_received += 1
+                
+                pct = (transfer.bytes_received / transfer.file_size) * 100 if transfer.file_size > 0 else 100
+                print(f"  [{self.node_name}] Chunk #{chunk_num} written: {len(binary_data)} bytes ({pct:.1f}% complete)", end="\\r")
+        except Exception as e:
+            print(f"\\n[{self.node_name}] Error writing file chunk: {e}")
+
+    def on_file_end(self, connection, packet: Packet) -> None:
+        try:
+            reader = FieldReader(packet.payload)
+            transfer_id = reader.get_int(KEY_TRANSFER_ID)
+
+            if transfer_id not in self.active_transfers:
+                print(f"\\n[{self.node_name}] Error: FILE_END received for inactive transfer ID {transfer_id}")
+                return
+
+            transfer = self.active_transfers[transfer_id]
+            if transfer.file_ref:
+                transfer.file_ref.close()
+                transfer.file_ref = None
+
+            print(f"\\n[{self.node_name}] File assembly completed!")
+            print(f"  Saved file: '{self.node_name}_{transfer.file_name}' to 'received_files/' directory.")
+            print(f"  Total size: {transfer.bytes_received} bytes in {transfer.chunks_received} chunks.")
+            del self.active_transfers[transfer_id]
+        except Exception as e:
+            print(f"\\n[{self.node_name}] Error completing file transfer: {e}")
+
+    def on_ping(self, connection, packet: Packet) -> None:
+        print(f"\\n[{self.node_name}] Received PING heartbeat. Responding with PONG.")
+        pong_packet = Packet(PacketType.PONG)
+        connection.send_packet(pong_packet)
+
+    def on_pong(self, connection, packet: Packet) -> None:
+        print(f"\\n[{self.node_name}] Received PONG heartbeat confirmation.")
+
+    def on_disconnect(self, connection, packet: Packet) -> None:
+        print(f"\\n[{self.node_name}] Remote peer disconnected.")
+        # Cleanup incomplete files
+        for tid, transfer in list(self.active_transfers.items()):
+            if transfer.file_ref:
+                transfer.file_ref.close()
+                try:
+                    os.remove(os.path.join("received_files", f"{self.node_name}_{transfer.file_name}"))
+                except OSError:
+                    pass
+            del self.active_transfers[tid]
 `
   },
   {
@@ -524,39 +685,30 @@ from dispatcher import Dispatcher
 class Connection:
     """
     Manages a single persistent, thread-safe TCP socket connection.
-    
-    Spawns a background thread that continuously blocks on the socket,
-    reads packets, and dispatches them to a designated Dispatcher.
+    Identical for both peers, receiving an already connected socket.
     """
 
     def __init__(self, sock: socket.socket, dispatcher: Dispatcher):
         """
-        Initialize a connection with a socket and a packet dispatcher.
-        
-        :param sock: The active connected TCP socket
-        :param dispatcher: The Dispatcher instance to handle incoming packets
+        Initialize a connection with an already connected socket and a dispatcher.
         """
         self.sock: socket.socket = sock
         self.dispatcher: Dispatcher = dispatcher
-        self._is_running: bool = False
-        self._read_thread: Optional[threading.Thread] = None
-        self._send_lock = threading.Lock()  # Prevent simultaneous writes from multiple threads
-
-    def start(self) -> None:
-        """Start the background packet receiver thread."""
-        if self._is_running:
-            return
-            
-        self._is_running = True
-        self._read_thread = threading.Thread(target=self._receive_loop, name="Connection-Receiver", daemon=True)
+        self._is_running: bool = True
+        self._send_lock = threading.Lock()  # Prevent simultaneous writes
+        
+        # Start background receiver thread executing the receive_loop
+        self._read_thread = threading.Thread(
+            target=self.receive_loop, 
+            name="Connection-Receiver", 
+            daemon=True
+        )
         self._read_thread.start()
 
     def send_packet(self, packet: Packet) -> None:
         """
         Send a Packet over the TCP socket in a thread-safe manner.
-        
-        :param packet: The Packet instance to send
-        :raises ConnectionError: If the socket is closed or fails to send
+        Can be safely called from any thread.
         """
         serialized = packet.serialize()
         with self._send_lock:
@@ -568,6 +720,26 @@ class Connection:
                 self.close()
                 raise ConnectionError(f"Failed to transmit packet: {e}")
 
+    def receive_loop(self) -> None:
+        """
+        Continuous reading loop executed inside a dedicated background thread.
+        """
+        try:
+            while self._is_running:
+                # Blocks until a complete packet is received
+                packet = Packet.receive_from_socket(self.sock)
+                # Dispatch the packet to our handler
+                self.dispatcher.dispatch(self, packet)
+        except ConnectionError:
+            pass
+        except Exception as e:
+            print(f"[Connection] Error in receiver loop: {e}")
+        finally:
+            self.close()
+            from packet_types import PacketType
+            disconnect_packet = Packet(PacketType.DISCONNECT)
+            self.dispatcher.dispatch(self, disconnect_packet)
+
     def close(self) -> None:
         """Close the socket and stop the background receiver thread."""
         if not self._is_running:
@@ -575,7 +747,6 @@ class Connection:
 
         self._is_running = False
         try:
-            # Shutdown socket to immediately wake up recv() blocks
             self.sock.shutdown(socket.SHUT_RDWR)
         except socket.error:
             pass
@@ -585,47 +756,26 @@ class Connection:
         except socket.error:
             pass
 
-        # Since daemon=True is set, we don't necessarily have to block joining,
-        # but joining briefly is good practice.
         if self._read_thread and threading.current_thread() != self._read_thread:
             self._read_thread.join(timeout=1.0)
 
-    def _receive_loop(self) -> None:
-        """Continuous reading loop executed inside the daemon background thread."""
-        try:
-            while self._is_running:
-                # Blocks until a complete packet is received
-                packet = Packet.receive_from_socket(self.sock)
-                # Dispatch the packet to our handler
-                self.dispatcher.dispatch(self, packet)
-        except ConnectionError:
-            # Expected when socket is closed or disconnected
-            pass
-        except Exception as e:
-            print(f"[Connection] Error in receiver loop: {e}")
-        finally:
-            self.close()
-            # Inform dispatcher of disconnect
-            # We construct a mock DISCONNECT packet to represent the socket closure
-            from packet_types import PacketType
-            disconnect_packet = Packet(PacketType.DISCONNECT)
-            self.dispatcher.dispatch(self, disconnect_packet)
-
     @property
     def is_active(self) -> bool:
-        """Check if the connection is currently running and active."""
+        """Check if the connection is currently active."""
         return self._is_running
 `
   },
   {
-    name: "server.py",
-    description: "The TCP Multi-Threaded Server. Listens for client connections, spawns dispatchers, and manages incoming high-speed file reassembly.",
+    name: "peer.py",
+    description: "Defines symmetric P2P helper functions for sending handshakes, chats, heartbeats, and files, along with the interactive peer shell.",
     code: `import os
-import socket
-import threading
-from typing import Dict, Any
+import time
+import random
+from connection import Connection
+from packet import Packet
+from packet_types import PacketType
+from field_writer import FieldWriter
 from constants import (
-    DEFAULT_PORT,
     KEY_DEVICE_NAME,
     KEY_APP_NAME,
     KEY_APP_VERSION,
@@ -640,425 +790,218 @@ from constants import (
     KEY_CHUNK_NUMBER,
     KEY_BINARY_DATA
 )
-from packet_types import PacketType
-from packet import Packet
-from field_writer import FieldWriter
-from field_reader import FieldReader
-from dispatcher import Dispatcher
-from connection import Connection
 
-class ActiveTransfer:
-    """Helper class to track file download states on the server."""
-    def __init__(self, transfer_id: int, file_name: str, file_size: int, chunk_size: int):
-        self.transfer_id = transfer_id
-        self.file_name = os.path.basename(file_name)  # Sanitize to prevent path traversal
-        self.file_size = file_size
-        self.chunk_size = chunk_size
-        self.bytes_received = 0
-        self.chunks_received = 0
-        self.file_ref = None
+def send_handshake(connection: Connection, node_name: str) -> None:
+    """Send protocol handshake symmetrically to identify this node."""
+    writer = FieldWriter()
+    writer.write_string(KEY_DEVICE_NAME, node_name)
+    writer.write_string(KEY_APP_NAME, "CustomBinaryP2PNode")
+    writer.write_string(KEY_APP_VERSION, "1.0.0")
+    writer.write_string(KEY_PLATFORM, "CrossPlatform/OS")
+    writer.write_short(KEY_PROTOCOL_VERSION, 1)
 
-class ServerDispatcher(Dispatcher):
-    """
-    Server-side packet dispatcher.
-    Implements business logic for managing connections, responding to handshakes,
-    printing text messages, and assembling files received via chunk stream.
-    """
+    packet = Packet(PacketType.HANDSHAKE, writer.get_bytes())
+    connection.send_packet(packet)
+    print(f"[{node_name}] Sent HANDSHAKE identifying as '{node_name}'")
 
-    def __init__(self):
-        self.active_transfers: Dict[int, ActiveTransfer] = {}
-        os.makedirs("received_files", exist_ok=True)
+def send_chat(connection: Connection, node_name: str, message: str) -> None:
+    """Send a text chat message to the remote peer."""
+    writer = FieldWriter()
+    writer.write_string(KEY_SENDER_NAME, node_name)
+    writer.write_string(KEY_TEXT_MESSAGE, message)
 
-    def on_handshake(self, connection: Connection, packet: Packet) -> None:
+    packet = Packet(PacketType.TEXT, writer.get_bytes())
+    connection.send_packet(packet)
+    print(f"[{node_name}] Sent chat message: '{message}'")
+
+def send_ping(connection: Connection, node_name: str) -> None:
+    """Send a heartbeat PING packet to the remote peer."""
+    packet = Packet(PacketType.PING)
+    connection.send_packet(packet)
+    print(f"[{node_name}] Sent PING heartbeat.")
+
+def send_file(connection: Connection, node_name: str, file_path: str, chunk_size: int = 4096) -> None:
+    """Symmetrically stream a file in chunks over the P2P connection."""
+    if not os.path.exists(file_path):
+        print(f"[{node_name}] Error: Local file not found: {file_path}")
+        return
+
+    file_name = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    transfer_id = random.randint(1000, 9999)
+
+    print(f"\\n[{node_name} File Stream] Initiating file transfer for '{file_name}':")
+    print(f"  Transfer ID: {transfer_id}")
+    print(f"  Size: {file_size} bytes")
+    print(f"  Chunk Size: {chunk_size} bytes")
+
+    # FILE_START
+    start_writer = FieldWriter()
+    start_writer.write_int(KEY_TRANSFER_ID, transfer_id)
+    start_writer.write_string(KEY_FILE_NAME, file_name)
+    start_writer.write_long(KEY_FILE_SIZE, file_size)
+    start_writer.write_int(KEY_CHUNK_SIZE, chunk_size)
+    connection.send_packet(Packet(PacketType.FILE_START, start_writer.get_bytes()))
+
+    # Chunks streaming
+    chunk_number = 0
+    bytes_sent = 0
+    with open(file_path, "rb") as f:
+        while True:
+            data = f.read(chunk_size)
+            if not data:
+                break
+            chunk_number += 1
+            chunk_writer = FieldWriter()
+            chunk_writer.write_int(KEY_TRANSFER_ID, transfer_id)
+            chunk_writer.write_int(KEY_CHUNK_NUMBER, chunk_number)
+            chunk_writer.write_bytes(KEY_BINARY_DATA, data)
+            connection.send_packet(Packet(PacketType.FILE_CHUNK, chunk_writer.get_bytes()))
+            bytes_sent += len(data)
+
+            pct = (bytes_sent / file_size) * 100 if file_size > 0 else 100
+            print(f"  [{node_name}] Sent chunk #{chunk_number}: {len(data)} bytes ({pct:.1f}% sent)", end="\\r")
+            time.sleep(0.001)
+    print()
+
+    # FILE_END
+    end_writer = FieldWriter()
+    end_writer.write_int(KEY_TRANSFER_ID, transfer_id)
+    connection.send_packet(Packet(PacketType.FILE_END, end_writer.get_bytes()))
+    print(f"[{node_name}] FILE_END packet sent. Complete.")
+
+def run_peer_repl(connection: Connection, node_name: str) -> None:
+    """Symmetric interactive CLI shell for either peer."""
+    print(f"\\n==============================================")
+    print(f"🚀 {node_name} Peer Shell Connected!")
+    print(f"Both sides are identical full-duplex peers.")
+    print(f"You can send chats, pings, or files at any time.")
+    print(f"==============================================")
+
+    try:
+        send_handshake(connection, node_name)
+    except Exception as e:
+        print(f"Failed to send handshake: {e}")
+
+    time.sleep(0.2)
+
+    while connection.is_active:
         try:
-            reader = FieldReader(packet.payload)
-            dev_name = reader.get_string(KEY_DEVICE_NAME)
-            app_name = reader.get_string(KEY_APP_NAME)
-            app_ver = reader.get_string(KEY_APP_VERSION)
-            platform = reader.get_string(KEY_PLATFORM)
-            proto_ver = reader.get_short(KEY_PROTOCOL_VERSION)
-
-            print(f"\\n[Server] Handshake received from client!")
-            print(f"  Device: {dev_name} ({platform})")
-            print(f"  App: {app_name} v{app_ver}")
-            print(f"  Protocol Version: {proto_ver}")
-
-            # Send HANDSHAKE_ACK
-            writer = FieldWriter()
-            writer.write_boolean(0x01, True)  # Key 0x01: Success status
-            writer.write_string(0x02, "Server Ready")
+            print("\\nOptions:")
+            print("1. Send Chat Message")
+            print("2. Send File")
+            print("3. Send Heartbeat PING")
+            print("4. Close / Disconnect")
             
-            ack_packet = Packet(PacketType.HANDSHAKE_ACK, writer.get_bytes())
-            connection.send_packet(ack_packet)
-            print("[Server] Handshake Approved. Sent HANDSHAKE_ACK.")
-        except Exception as e:
-            print(f"[Server] Handshake failed: {e}")
-            connection.close()
-
-    def on_text(self, connection: Connection, packet: Packet) -> None:
-        try:
-            reader = FieldReader(packet.payload)
-            sender = reader.get_string(KEY_SENDER_NAME, default="Unknown Client")
-            message = reader.get_string(KEY_TEXT_MESSAGE)
-            print(f"\\n[Client Message] {sender}: {message}")
-        except Exception as e:
-            print(f"[Server] Error reading text packet: {e}")
-
-    def on_file_start(self, connection: Connection, packet: Packet) -> None:
-        try:
-            reader = FieldReader(packet.payload)
-            transfer_id = reader.get_int(KEY_TRANSFER_ID)
-            file_name = reader.get_string(KEY_FILE_NAME)
-            file_size = reader.get_long(KEY_FILE_SIZE)
-            chunk_size = reader.get_int(KEY_CHUNK_SIZE)
-
-            print(f"\\n[File Transfer] Initializing download:")
-            print(f"  Transfer ID: {transfer_id}")
-            print(f"  Name: {file_name}")
-            print(f"  Size: {file_size} bytes")
-            print(f"  Chunk Size: {chunk_size} bytes")
-
-            transfer = ActiveTransfer(transfer_id, file_name, file_size, chunk_size)
-            save_path = os.path.join("received_files", transfer.file_name)
-            
-            # Open file for writing binary chunks
-            transfer.file_ref = open(save_path, "wb")
-            self.active_transfers[transfer_id] = transfer
-            print(f"[Server] File created: {save_path}. Awaiting chunks...")
-        except Exception as e:
-            print(f"[Server] Error initiating file transfer: {e}")
-
-    def on_file_chunk(self, connection: Connection, packet: Packet) -> None:
-        try:
-            reader = FieldReader(packet.payload)
-            transfer_id = reader.get_int(KEY_TRANSFER_ID)
-            chunk_num = reader.get_int(KEY_CHUNK_NUMBER)
-            binary_data = reader.get_bytes(KEY_BINARY_DATA)
-
-            if transfer_id not in self.active_transfers:
-                print(f"[Server] Error: Received chunk for inactive transfer ID {transfer_id}")
-                return
-
-            transfer = self.active_transfers[transfer_id]
-            if transfer.file_ref:
-                transfer.file_ref.write(binary_data)
-                transfer.bytes_received += len(binary_data)
-                transfer.chunks_received += 1
-                
-                pct = (transfer.bytes_received / transfer.file_size) * 100 if transfer.file_size > 0 else 100
-                print(f"  Chunk #{chunk_num} received: {len(binary_data)} bytes ({pct:.1f}% downloaded)", end="\\r")
-        except Exception as e:
-            print(f"\\n[Server] Error parsing file chunk: {e}")
-
-    def on_file_end(self, connection: Connection, packet: Packet) -> None:
-        try:
-            reader = FieldReader(packet.payload)
-            transfer_id = reader.get_int(KEY_TRANSFER_ID)
-
-            if transfer_id not in self.active_transfers:
-                print(f"[Server] Error: FILE_END for inactive transfer ID {transfer_id}")
-                return
-
-            transfer = self.active_transfers[transfer_id]
-            if transfer.file_ref:
-                transfer.file_ref.close()
-                transfer.file_ref = None
-
-            print(f"\\n[File Transfer Complete] Saved '{transfer.file_name}' to 'received_files/' folder.")
-            print(f"  Total size: {transfer.bytes_received} bytes across {transfer.chunks_received} chunks.")
-            del self.active_transfers[transfer_id]
-        except Exception as e:
-            print(f"\\n[Server] Error completing file transfer: {e}")
-
-    def on_ping(self, connection: Connection, packet: Packet) -> None:
-        print("[Server] Ping received. Replying with Pong.")
-        pong_packet = Packet(PacketType.PONG)
-        connection.send_packet(pong_packet)
-
-    def on_disconnect(self, connection: Connection, packet: Packet) -> None:
-        print("\\n[Server] Client disconnected.")
-        # Cleanup any unfinished transfers
-        for tid, transfer in list(self.active_transfers.items()):
-            if transfer.file_ref:
-                transfer.file_ref.close()
-                try:
-                    os.remove(os.path.join("received_files", transfer.file_name))
-                except OSError:
-                    pass
-            del self.active_transfers[tid]
-
-class CustomTCPServer:
-    """Multi-threaded custom binary TCP protocol server."""
-
-    def __init__(self, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
-        self.host = host
-        self.port = port
-        self.server_sock: Optional[socket.socket] = None
-        self.is_running = False
-        self.connections = []
-
-    def start(self) -> None:
-        """Start listening and accept clients on a background thread."""
-        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
-        try:
-            self.server_sock.bind((self.host, self.port))
-            self.server_sock.listen(5)
-            self.is_running = True
-            print(f"[Server] Custom binary TCP protocol server listening on {self.host}:{self.port}")
-            
-            accept_thread = threading.Thread(target=self._accept_loop, name="Server-Acceptor", daemon=True)
-            accept_thread.start()
-        except Exception as e:
-            print(f"[Server] Failed to start server: {e}")
-
-    def stop(self) -> None:
-        """Shutdown the server and close all client connections."""
-        self.is_running = False
-        if self.server_sock:
-            try:
-                self.server_sock.close()
-            except socket.error:
-                pass
-        
-        print("[Server] Stopping and closing client connections...")
-        for conn in self.connections:
-            conn.close()
-        self.connections.clear()
-
-    def _accept_loop(self) -> None:
-        while self.is_running:
-            try:
-                client_sock, addr = self.server_sock.accept()
-                print(f"\\n[Server] Direct socket connection accepted from {addr[0]}:{addr[1]}")
-                
-                # Wrap socket inside our thread-safe connection with server dispatch logic
-                dispatcher = ServerDispatcher()
-                connection = Connection(client_sock, dispatcher)
-                self.connections.append(connection)
-                
-                connection.start()
-            except socket.error:
-                # Triggers when server_sock.close() is called
+            choice = input("\\nEnter choice (1-4): ").strip()
+            if not connection.is_active:
                 break
 
-if __name__ == "__main__":
-    server = CustomTCPServer()
-    server.start()
+            if choice == "1":
+                msg = input("Enter message: ").strip()
+                if msg:
+                    send_chat(connection, node_name, msg)
+            elif choice == "2":
+                path = input("Enter local file path to send: ").strip()
+                if path:
+                    send_file(connection, node_name, path)
+            elif choice == "3":
+                send_ping(connection, node_name)
+            elif choice == "4":
+                print("Disconnecting gracefully...")
+                try:
+                    connection.send_packet(Packet(PacketType.DISCONNECT))
+                except Exception:
+                    pass
+                connection.close()
+                break
+            else:
+                print("Invalid option.")
+        except KeyboardInterrupt:
+            print("\\nExiting...")
+            try:
+                connection.send_packet(Packet(PacketType.DISCONNECT))
+            except Exception:
+                pass
+            connection.close()
+            break
+        except Exception as e:
+            print(f"Error: {e}")
+            break
+`
+  },
+  {
+    name: "server.py",
+    description: "Listens for exactly one incoming socket, accepts it, spawns the Connection object, and runs the identical symmetric P2P shell.",
+    code: `import socket
+from constants import DEFAULT_PORT
+from dispatcher import PeerDispatcher
+from connection import Connection
+from peer import run_peer_repl
+
+def main() -> None:
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
     try:
-        # Keep main thread alive
-        while True:
-            import time
-            time.sleep(1)
-    except KeyboardInterrupt:
-        server.stop()
+        server_sock.bind(("0.0.0.0", DEFAULT_PORT))
+        server_sock.listen(1)
+        print(f"📡 [Server] Listening for exactly one peer connection on port {DEFAULT_PORT}...")
+        
+        client_sock, addr = server_sock.accept()
+        print(f"📥 [Server] Connection accepted from: {addr[0]}:{addr[1]}")
+        server_sock.close()
+        
+        # Wrapped identically for P2P operations
+        dispatcher = PeerDispatcher(node_name="ServerPeer")
+        connection = Connection(client_sock, dispatcher)
+        
+        run_peer_repl(connection, "ServerPeer")
+    except Exception as e:
+        print(f"❌ [Server] Error: {e}")
+    finally:
+        try:
+            server_sock.close()
+        except OSError:
+            pass
+
+if __name__ == "__main__":
+    main()
 `
   },
   {
     name: "client.py",
-    description: "The TCP Client. Integrates connection handshake, structured payload writing, and segmented binary file uploading.",
-    code: `import os
-import socket
-import time
-from typing import Optional
-from constants import (
-    DEFAULT_PORT,
-    KEY_DEVICE_NAME,
-    KEY_APP_NAME,
-    KEY_APP_VERSION,
-    KEY_PLATFORM,
-    KEY_PROTOCOL_VERSION,
-    KEY_TEXT_MESSAGE,
-    KEY_SENDER_NAME,
-    KEY_TRANSFER_ID,
-    KEY_FILE_NAME,
-    KEY_FILE_SIZE,
-    KEY_CHUNK_SIZE,
-    KEY_CHUNK_NUMBER,
-    KEY_BINARY_DATA
-)
-from packet_types import PacketType
-from packet import Packet
-from field_writer import FieldWriter
-from field_reader import FieldReader
-from dispatcher import Dispatcher
+    description: "Connects to the server's listening socket, wraps the socket in the identical Connection class, and runs the identical symmetric P2P shell.",
+    code: `import socket
+from constants import DEFAULT_PORT
+from dispatcher import PeerDispatcher
 from connection import Connection
+from peer import run_peer_repl
 
-class ClientDispatcher(Dispatcher):
-    """
-    Client-side packet dispatcher.
-    Handles inbound server messages such as Handshake ACKs, PONG replies,
-    and server disconnect notification events.
-    """
-
-    def on_handshake_ack(self, connection: Connection, packet: Packet) -> None:
-        try:
-            reader = FieldReader(packet.payload)
-            success = reader.get_boolean(0x01, default=False)
-            message = reader.get_string(0x02, default="No message")
-            print(f"\\n[Client] Handshake ACK received! Status: {'Approved' if success else 'Rejected'} - Message: {message}")
-        except Exception as e:
-            print(f"[Client] Error reading handshake ack: {e}")
-
-    def on_pong(self, connection: Connection, packet: Packet) -> None:
-        print("\\n[Client] Pong reply received from server.")
-
-    def on_disconnect(self, connection: Connection, packet: Packet) -> None:
-        print("\\n[Client] Disconnected from server.")
-
-class CustomTCPClient:
-    """Object-oriented binary client for the custom protocol."""
-
-    def __init__(self):
-        self.connection: Optional[Connection] = None
-        self.dispatcher = ClientDispatcher()
-        self._transfer_counter = 1
-
-    def connect(self, host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> bool:
-        """Connect to the server and start the background listener thread."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.connect((host, port))
-            self.connection = Connection(sock, self.dispatcher)
-            self.connection.start()
-            print(f"[Client] Connected to server at {host}:{port}")
-            return True
-        except Exception as e:
-            print(f"[Client] Failed to connect: {e}")
-            return False
-
-    def send_handshake(self) -> None:
-        """Send the protocol handshake with device and platform details."""
-        if not self.connection or not self.connection.is_active:
-            raise ConnectionError("No active server connection.")
-
-        writer = FieldWriter()
-        writer.write_string(KEY_DEVICE_NAME, "PythonClient-Node")
-        writer.write_string(KEY_APP_NAME, "CustomBinaryProtocolPlayground")
-        writer.write_string(KEY_APP_VERSION, "1.0.0")
-        writer.write_string(KEY_PLATFORM, "Linux/MacOS")
-        writer.write_short(KEY_PROTOCOL_VERSION, 1)
-
-        packet = Packet(PacketType.HANDSHAKE, writer.get_bytes())
-        self.connection.send_packet(packet)
-        print("[Client] Sent HANDSHAKE packet.")
-
-    def send_chat(self, sender: str, message: str) -> None:
-        """Send a standard text chat message packet."""
-        if not self.connection or not self.connection.is_active:
-            raise ConnectionError("No active server connection.")
-
-        writer = FieldWriter()
-        writer.write_string(KEY_SENDER_NAME, sender)
-        writer.write_string(KEY_TEXT_MESSAGE, message)
-
-        packet = Packet(PacketType.TEXT, writer.get_bytes())
-        self.connection.send_packet(packet)
-        print(f"[Client] Sent chat message: '{message}'")
-
-    def send_ping(self) -> None:
-        """Send a heartbeat PING packet."""
-        if not self.connection or not self.connection.is_active:
-            raise ConnectionError("No active server connection.")
-
-        packet = Packet(PacketType.PING)
-        self.connection.send_packet(packet)
-        print("[Client] Sent PING heartbeat.")
-
-    def send_file(self, file_path: str, chunk_size: int = 4096) -> None:
-        """
-        Send a local file over the network split into serialized binary chunks.
+def main() -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    host = "127.0.0.1"
+    
+    try:
+        print(f"🔌 [Client] Connecting to remote host {host}:{DEFAULT_PORT}...")
+        sock.connect((host, DEFAULT_PORT))
+        print(f"🟢 [Client] Connected successfully!")
         
-        :param file_path: The local path to the file to send
-        :param chunk_size: Maximum size of individual data payloads (default 4KB)
-        """
-        if not self.connection or not self.connection.is_active:
-            raise ConnectionError("No active server connection.")
-
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Local file not found: {file_path}")
-
-        file_name = os.path.basename(file_path)
-        file_size = os.path.getsize(file_path)
-        transfer_id = self._transfer_counter
-        self._transfer_counter += 1
-
-        print(f"\\n[Client] Initiating high-speed file transfer for '{file_name}':")
-        print(f"  Size: {file_size} bytes")
-        print(f"  Chunk Size: {chunk_size} bytes")
-
-        # 1. Send FILE_START packet
-        start_writer = FieldWriter()
-        start_writer.write_int(KEY_TRANSFER_ID, transfer_id)
-        start_writer.write_string(KEY_FILE_NAME, file_name)
-        start_writer.write_long(KEY_FILE_SIZE, file_size)
-        start_writer.write_int(KEY_CHUNK_SIZE, chunk_size)
-
-        start_packet = Packet(PacketType.FILE_START, start_writer.get_bytes())
-        self.connection.send_packet(start_packet)
-        print("[Client] FILE_START packet transmitted.")
-
-        # 2. Read and stream FILE_CHUNK packets
-        chunk_number = 0
-        bytes_sent = 0
-
-        with open(file_path, "rb") as f:
-            while True:
-                data = f.read(chunk_size)
-                if not data:
-                    break
-
-                chunk_number += 1
-                chunk_writer = FieldWriter()
-                chunk_writer.write_int(KEY_TRANSFER_ID, transfer_id)
-                chunk_writer.write_int(KEY_CHUNK_NUMBER, chunk_number)
-                chunk_writer.write_bytes(KEY_BINARY_DATA, data)
-
-                chunk_packet = Packet(PacketType.FILE_CHUNK, chunk_writer.get_bytes())
-                self.connection.send_packet(chunk_packet)
-                bytes_sent += len(data)
-
-                pct = (bytes_sent / file_size) * 100 if file_size > 0 else 100
-                print(f"  Streamed chunk #{chunk_number}: {len(data)} bytes ({pct:.1f}% sent)", end="\\r")
-                
-                # Small micro-sleep in fast local Wi-Fi simulations prevents overwhelming socket buffers
-                time.sleep(0.001)
-
-        print() # New line after carriage return progress info
-
-        # 3. Send FILE_END packet
-        end_writer = FieldWriter()
-        end_writer.write_int(KEY_TRANSFER_ID, transfer_id)
-
-        end_packet = Packet(PacketType.FILE_END, end_writer.get_bytes())
-        self.connection.send_packet(end_packet)
-        print("[Client] FILE_END packet transmitted. Complete.")
-
-    def disconnect(self) -> None:
-        """Gracefully notify server of disconnection and close connection."""
-        if self.connection and self.connection.is_active:
-            try:
-                # Transmit a disconnect notification
-                self.connection.send_packet(Packet(PacketType.DISCONNECT))
-            except Exception:
-                pass
-            self.connection.close()
-            print("[Client] Connection closed.")
+        # Wrapped identically for P2P operations
+        dispatcher = PeerDispatcher(node_name="ClientPeer")
+        connection = Connection(sock, dispatcher)
+        
+        run_peer_repl(connection, "ClientPeer")
+    except Exception as e:
+        print(f"❌ [Client] Failed to establish connection: {e}")
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 if __name__ == "__main__":
-    # Small test runner if executed directly
-    client = CustomTCPClient()
-    if client.connect("127.0.0.1", DEFAULT_PORT):
-        try:
-            client.send_handshake()
-            time.sleep(0.5)
-            client.send_chat("Alice", "Hello from custom protocol!")
-            time.sleep(0.5)
-            client.send_ping()
-            time.sleep(0.5)
-        finally:
-            client.disconnect()
+    main()
 `
   }
 ];
