@@ -45,7 +45,7 @@ import {
   KEY_SENDER_NAME,
   SerializedPacketResult
 } from "./protocol_sim";
-import { pythonCodeFiles } from "./code_strings";
+import { pythonCodeFiles, kotlinCodeFiles } from "./code_strings";
 
 interface SimLog {
   id: string;
@@ -118,6 +118,7 @@ export default function App() {
   const [activeTransferId, setActiveTransferId] = useState<number>(303);
 
   // Code Explorer Tab State
+  const [selectedLang, setSelectedLang] = useState<"python" | "kotlin">("python");
   const [selectedFileIdx, setSelectedFileIdx] = useState(0);
   const [copied, setCopied] = useState(false);
 
@@ -1224,126 +1225,213 @@ export default function App() {
 
         {/* ==================== TAB 3: CODE EXPLORER ==================== */}
         {activeTab === "code" && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            
-            {/* File navigator tree (3 cols) */}
-            <div className="lg:col-span-3 bg-[#161b22] border border-slate-800 rounded-2xl p-5 shadow-xl">
-              <h3 className="text-xs uppercase tracking-wider font-bold text-slate-400 mb-4 flex items-center gap-2">
-                <Database className="w-3.5 h-3.5" />
-                Workspace Files
-              </h3>
-              
-              <div className="space-y-1.5">
-                {pythonCodeFiles.map((file, idx) => {
-                  const isSelected = selectedFileIdx === idx;
-                  return (
-                    <button
-                      key={file.name}
-                      onClick={() => setSelectedFileIdx(idx)}
-                      className={`w-full text-left flex items-center justify-between px-3.5 py-2.5 rounded-xl border text-xs font-semibold transition-all ${
-                        isSelected 
-                          ? "bg-teal-950/40 text-teal-300 border-teal-800 shadow-md" 
-                          : "bg-slate-900 border-slate-850 text-slate-400 hover:border-slate-800 hover:text-slate-200"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <FileText className={`w-4 h-4 ${isSelected ? "text-teal-400" : "text-slate-500"}`} />
-                        <span>{file.name}</span>
-                      </div>
-                      <ChevronRight className="w-3 h-3 opacity-60" />
-                    </button>
-                  );
-                })}
-              </div>
+          <div className="space-y-6">
+            {/* Language Selection bar */}
+            <div className="flex bg-slate-900/80 p-1.5 rounded-2xl border border-slate-800 max-w-md mx-auto">
+              <button
+                onClick={() => {
+                  setSelectedLang("python");
+                  setSelectedFileIdx(0);
+                }}
+                className={`flex-1 py-2 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all ${
+                  selectedLang === "python"
+                    ? "bg-teal-600 text-white shadow-lg"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                <Cpu className="w-4 h-4" />
+                Python Codebase
+              </button>
+              <button
+                onClick={() => {
+                  setSelectedLang("kotlin");
+                  setSelectedFileIdx(0);
+                }}
+                className={`flex-1 py-2 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all ${
+                  selectedLang === "kotlin"
+                    ? "bg-teal-600 text-white shadow-lg"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                <Network className="w-4 h-4" />
+                Android Kotlin Library
+              </button>
             </div>
 
-            {/* High fidelity code reader and detailer (9 cols) */}
-            <div className="lg:col-span-9 bg-[#161b22] border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col gap-5">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
               
-              {/* Summary metadata header */}
-              <div className="flex flex-wrap gap-4 items-start justify-between border-b border-slate-800 pb-5">
-                <div>
-                  <div className="flex items-center gap-2.5 mb-1.5">
-                    <h2 className="text-lg font-bold text-white font-mono">{pythonCodeFiles[selectedFileIdx].name}</h2>
-                    <span className="text-[10px] font-bold tracking-widest uppercase bg-slate-900 text-slate-300 border border-slate-800 px-2 py-0.5 rounded">python</span>
+              {/* File navigator tree (3 cols) */}
+              <div className="lg:col-span-3 bg-[#161b22] border border-slate-800 rounded-2xl p-5 shadow-xl">
+                <h3 className="text-xs uppercase tracking-wider font-bold text-slate-400 mb-4 flex items-center gap-2">
+                  <Database className="w-3.5 h-3.5" />
+                  Workspace Files
+                </h3>
+                
+                <div className="space-y-1.5 max-h-[500px] overflow-y-auto scrollbar-thin">
+                  {(selectedLang === "python" ? pythonCodeFiles : kotlinCodeFiles).map((file, idx) => {
+                    const isSelected = selectedFileIdx === idx;
+                    return (
+                      <button
+                        key={file.name}
+                        onClick={() => setSelectedFileIdx(idx)}
+                        className={`w-full text-left flex items-center justify-between px-3.5 py-2.5 rounded-xl border text-xs font-semibold transition-all ${
+                          isSelected 
+                            ? "bg-teal-950/40 text-teal-300 border-teal-800 shadow-md" 
+                            : "bg-slate-900 border-slate-850 text-slate-400 hover:border-slate-800 hover:text-slate-200"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 truncate">
+                          <FileText className={`w-4 h-4 shrink-0 ${isSelected ? "text-teal-400" : "text-slate-500"}`} />
+                          <span className="truncate">{file.name}</span>
+                        </div>
+                        <ChevronRight className="w-3 h-3 opacity-60 shrink-0" />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* High fidelity code reader and detailer (9 cols) */}
+              <div className="lg:col-span-9 bg-[#161b22] border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col gap-5">
+                
+                {/* Summary metadata header */}
+                <div className="flex flex-wrap gap-4 items-start justify-between border-b border-slate-800 pb-5">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2.5 mb-1.5">
+                      <h2 className="text-lg font-bold text-white font-mono truncate">
+                        {(selectedLang === "python" ? pythonCodeFiles : kotlinCodeFiles)[selectedFileIdx]?.name}
+                      </h2>
+                      <span className="text-[10px] font-bold tracking-widest uppercase bg-slate-900 text-slate-300 border border-slate-800 px-2 py-0.5 rounded shrink-0">
+                        {selectedLang}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      {(selectedLang === "python" ? pythonCodeFiles : kotlinCodeFiles)[selectedFileIdx]?.description}
+                    </p>
                   </div>
-                  <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
-                    {pythonCodeFiles[selectedFileIdx].description}
-                  </p>
+
+                  <button
+                    onClick={() => copyToClipboard((selectedLang === "python" ? pythonCodeFiles : kotlinCodeFiles)[selectedFileIdx]?.code || "")}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition-all shrink-0 ${
+                      copied 
+                        ? "bg-emerald-950/40 text-emerald-300 border-emerald-800" 
+                        : "bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-slate-200"
+                    }`}
+                  >
+                    {copied ? (
+                      <>
+                        <Check className="w-4 h-4" />
+                        Copied!
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-4 h-4" />
+                        Copy Code
+                      </>
+                    )}
+                  </button>
                 </div>
 
-                <button
-                  onClick={() => copyToClipboard(pythonCodeFiles[selectedFileIdx].code)}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition-all ${
-                    copied 
-                      ? "bg-emerald-950/40 text-emerald-300 border-emerald-800" 
-                      : "bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-slate-200"
-                  }`}
-                >
-                  {copied ? (
-                    <>
-                      <Check className="w-4 h-4" />
-                      Copied!
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-4 h-4" />
-                      Copy Code
-                    </>
-                  )}
-                </button>
+                {/* Custom styled code box */}
+                <div className="relative rounded-xl border border-slate-850 overflow-hidden">
+                  <div className="absolute top-3 right-4 flex items-center gap-2 bg-[#0d1117] px-2.5 py-1 rounded-md border border-slate-850 z-10 text-[10px] font-mono text-slate-500">
+                    <span>UTF-8 ENCODING</span>
+                  </div>
+                  <pre className="p-5 overflow-auto bg-[#0d1117] text-slate-300 font-mono text-xs leading-relaxed max-h-[580px] scrollbar-thin">
+                    <code>{(selectedLang === "python" ? pythonCodeFiles : kotlinCodeFiles)[selectedFileIdx]?.code}</code>
+                  </pre>
+                </div>
+
+                {/* Informative details banner */}
+                <div className="bg-slate-900/60 rounded-xl border border-slate-850 p-4 flex gap-3 items-start text-xs text-slate-400 leading-relaxed">
+                  <div className="bg-slate-800 p-1.5 rounded-lg border border-slate-700 text-teal-400 shrink-0">
+                    <Sparkles className="w-4 h-4" />
+                  </div>
+                  <div className="space-y-1">
+                    <p className="font-semibold text-white">Architectural Highlight</p>
+                    {selectedLang === "python" ? (
+                      <div>
+                        {selectedFileIdx === 0 && (
+                          <p>This constants specification establishes a robust layout schema. Key boundaries (like key fields) are partitioned so that numeric parsing can map instantly to logical components without string-matching delays, maintaining peak speed over high-throughput channels.</p>
+                        )}
+                        {selectedFileIdx === 1 && (
+                          <p>Using integer enumerations allows the packet header parser to read a single byte, match it directly against the integer value, and route it. This eliminates the parsing overhead of text-based formats like JSON or XML.</p>
+                        )}
+                        {selectedFileIdx === 2 && (
+                          <p>The <code>Field</code> class implements direct packing utilizing Python's <code>struct.pack</code> module. It ensures big-endian standard format (using the <code>&gt;</code> character), securing flawless binary alignment when transmitting across different CPU architectures.</p>
+                        )}
+                        {selectedFileIdx === 3 && (
+                          <p>The <code>FieldWriter</code> adopts the Builder design pattern. By maintaining a private mutable <code>bytearray</code> and chaining methods, we avoid recreating buffers repeatedly, which reduces garbage collector load during heavy file chunk streaming.</p>
+                        )}
+                        {selectedFileIdx === 4 && (
+                          <p>The <code>FieldReader</code> scans the binary chunk, verifying every field's <code>FIELD_MARKER</code>. If a packet is intercepted or corrupted, marker mismatch raises an immediate parsing error, preventing corrupt data from compromising state.</p>
+                        )}
+                        {selectedFileIdx === 5 && (
+                          <p>The <code>Packet</code> represents the main network frame. Its static <code>receive_from_socket</code> method implements exact streaming frame reads. Since TCP is a streaming byte protocol and not packet-oriented, it handles chunked TCP reads until the designated packet length is fulfilled.</p>
+                        )}
+                        {selectedFileIdx === 6 && (
+                          <p>The event-driven <code>Dispatcher</code> provides standard inheritance hooks. This lets other modules listen to specific packet signals (like <code>on_text</code> or <code>on_file_chunk</code>) without messing with socket read and framing layers.</p>
+                        )}
+                        {selectedFileIdx === 7 && (
+                          <p>The <code>Connection</code> class starts a background daemon receiver thread and coordinates outbound writes using a thread lock. This lets you send a file and chat in the foreground while simultaneously listening for heartbeats in the background.</p>
+                        )}
+                        {selectedFileIdx === 8 && (
+                          <p>The multi-threaded server uses standard socket bindings and spins up a dedicated connection instance for every accepted TCP client. It re-assembles files safely in the <code>received_files/</code> directory, neutralizing path-traversal attacks with <code>os.path.basename</code> validation.</p>
+                        )}
+                        {selectedFileIdx === 9 && (
+                          <p>The client performs full network sequences. It establishes connections, wraps them in listener threads, validates handshakes, sends messages, and segments binary file objects into sequential chunk packets sequentially.</p>
+                        )}
+                      </div>
+                    ) : (
+                      <div>
+                        {selectedFileIdx === 0 && (
+                          <p>The public static entry point <code>Protocol</code> leverages a cached thread pool and safely redirects network listener callbacks to the Android UI main thread using a Handler, fully protecting developers from <code>NetworkOnMainThreadException</code>.</p>
+                        )}
+                        {selectedFileIdx === 1 && (
+                          <p>The <code>Transport</code> interface enforces strict decoupling. It allows swapping the network communication medium completely (e.g. from raw TCP Sockets to WebSockets, Bluetooth RFCOMM, or simulated test streams) without rewriting any packagers or handshakers.</p>
+                        )}
+                        {selectedFileIdx === 2 && (
+                          <p>The <code>TcpTransport</code> provides a production-grade TCP implementation of the transport interface. It encapsulates standard <code>java.net.Socket</code> setup, socket-connect timeouts, and fully buffers incoming and outgoing streams to prevent sub-optimal packet aggregation delays.</p>
+                        )}
+                        {selectedFileIdx === 3 && (
+                          <p>The <code>Connection</code> class starts an autonomous background reader loop to block and parse packets continuously. Outbound writes are fully synchronized via a thread-safe mutex on the <code>PacketWriter</code>, enabling full-duplex communication.</p>
+                        )}
+                        {selectedFileIdx === 4 && (
+                          <p>The <code>Packet</code> is the core immutable unit of protocol transmission. It formats standard 3-byte binary headers (1-byte PacketType + 2-byte payload size) using <code>java.nio.ByteBuffer</code> byte-packing.</p>
+                        )}
+                        {selectedFileIdx === 5 && (
+                          <p>The <code>PacketReader</code> performs precise stream consumption. It reads the first 3 header bytes, unpacks the declared Big-Endian 16-bit short payload length, and loops sequentially until the complete payload is fulfilled.</p>
+                        )}
+                        {selectedFileIdx === 6 && (
+                          <p>The <code>PacketWriter</code> executes thread-safe serialization and flushes bytes directly onto the lower [Transport] stream, fully synchronized to prevent packet corruption during simultaneous background transfers.</p>
+                        )}
+                        {selectedFileIdx === 7 && (
+                          <p>The <code>Field</code> represents a single logical TLV field record. It guarantees the custom protocol marker <code>FIELD_MARKER</code> prefix, 1-byte field key, 2-byte Big-Endian payload length, and raw binary value.</p>
+                        )}
+                        {selectedFileIdx === 8 && (
+                          <p>The <code>FieldWriter</code> adopts a high-speed builder pattern utilizing a <code>ByteArrayOutputStream</code>. It packs primitives (Short, Int, Long, Boolean, String, ByteArray) with strict byte sizing and endianness.</p>
+                        )}
+                        {selectedFileIdx === 9 && (
+                          <p>The <code>FieldReader</code> implements strict, sequential binary decoding of incoming packet payloads. It validates the <code>FIELD_MARKER</code> at the start of every TLV record and throws descriptive <code>IOException</code>s if data integrity is compromised.</p>
+                        )}
+                        {selectedFileIdx === 10 && (
+                          <p>The <code>Dispatcher</code> maps incoming packet type bytes directly to custom <code>PacketHandler</code> closures. This event-driven design allows external modules to register and unregister handlers dynamically for custom extensions.</p>
+                        )}
+                        {selectedFileIdx === 11 && (
+                          <p>The <code>Session</code> serves as the high-level orchestrator. Symmetrically, it negotiates automatic handshakes immediately upon network connection and registers core handlers for heartbeats (PING/PONG), chat, and files.</p>
+                        )}
+                        {selectedFileIdx === 12 && (
+                          <p>The <code>TransferManager</code> slices outgoing files into chunk packets and tracks stats like speed (bytes/sec) and ETA. It supports dynamic mid-stream cancellations, cleanly closing streams and deleting partial temporary files.</p>
+                        )}
+                        {selectedFileIdx === 13 && (
+                          <p>The <code>ProtocolListener</code> uses Kotlin's default interface methods, allowing developers to listen for connections, chats, and chunk transfers without writing redundant boilerplate.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
               </div>
-
-              {/* Custom styled code box */}
-              <div className="relative rounded-xl border border-slate-850 overflow-hidden">
-                <div className="absolute top-3 right-4 flex items-center gap-2 bg-[#0d1117] px-2.5 py-1 rounded-md border border-slate-850 z-10 text-[10px] font-mono text-slate-500">
-                  <span>UTF-8 ENCODING</span>
-                </div>
-                <pre className="p-5 overflow-auto bg-[#0d1117] text-slate-300 font-mono text-xs leading-relaxed max-h-[580px] scrollbar-thin">
-                  <code>{pythonCodeFiles[selectedFileIdx].code}</code>
-                </pre>
-              </div>
-
-              {/* Informative details banner */}
-              <div className="bg-slate-900/60 rounded-xl border border-slate-850 p-4 flex gap-3 items-start text-xs text-slate-400 leading-relaxed">
-                <div className="bg-slate-800 p-1.5 rounded-lg border border-slate-700 text-teal-400 shrink-0">
-                  <Sparkles className="w-4 h-4" />
-                </div>
-                <div>
-                  <p className="font-semibold text-white mb-0.5">Architectural Highlight</p>
-                  {selectedFileIdx === 0 && (
-                    <p>This constants specification establishes a robust layout schema. Key boundaries (like key fields) are partitioned so that numeric parsing can map instantly to logical components without string-matching delays, maintaining peak speed over high-throughput channels.</p>
-                  )}
-                  {selectedFileIdx === 1 && (
-                    <p>Using integer enumerations allows the packet header parser to read a single byte, match it directly against the integer value, and route it. This eliminates the parsing overhead of text-based formats like JSON or XML.</p>
-                  )}
-                  {selectedFileIdx === 2 && (
-                    <p>The <code>Field</code> class implements direct packing utilizing Python's <code>struct.pack</code> module. It ensures big-endian standard format (using the <code>&gt;</code> character), securing flawless binary alignment when transmitting across different CPU architectures.</p>
-                  )}
-                  {selectedFileIdx === 3 && (
-                    <p>The <code>FieldWriter</code> adopts the Builder design pattern. By maintaining a private mutable <code>bytearray</code> and chaining methods, we avoid recreating buffers repeatedly, which reduces garbage collector load during heavy file chunk streaming.</p>
-                  )}
-                  {selectedFileIdx === 4 && (
-                    <p>The <code>FieldReader</code> scans the binary chunk, verifying every field's <code>FIELD_MARKER</code>. If a packet is intercepted or corrupted, marker mismatch raises an immediate parsing error, preventing corrupt data from compromising state.</p>
-                  )}
-                  {selectedFileIdx === 5 && (
-                    <p>The <code>Packet</code> represents the main network frame. Its static <code>receive_from_socket</code> method implements exact streaming frame reads. Since TCP is a streaming byte protocol and not packet-oriented, it handles chunked TCP reads until the designated packet length is fulfilled.</p>
-                  )}
-                  {selectedFileIdx === 6 && (
-                    <p>The event-driven <code>Dispatcher</code> provides standard inheritance hooks. This lets other modules listen to specific packet signals (like <code>on_text</code> or <code>on_file_chunk</code>) without messing with socket read and framing layers.</p>
-                  )}
-                  {selectedFileIdx === 7 && (
-                    <p>The <code>Connection</code> class starts a background daemon receiver thread and coordinates outbound writes using a thread lock. This lets you send a file and chat in the foreground while simultaneously listening for heartbeats in the background.</p>
-                  )}
-                  {selectedFileIdx === 8 && (
-                    <p>The multi-threaded server uses standard socket bindings and spins up a dedicated connection instance for every accepted TCP client. It re-assembles files safely in the <code>received_files/</code> directory, neutralizing path-traversal attacks with <code>os.path.basename</code> validation.</p>
-                  )}
-                  {selectedFileIdx === 9 && (
-                    <p>The client performs full network sequences. It establishes connections, wraps them in listener threads, validates handshakes, sends messages, and segments binary file objects into sequential chunk packets sequentially.</p>
-                  )}
-                </div>
-              </div>
-
             </div>
           </div>
         )}

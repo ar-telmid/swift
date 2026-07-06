@@ -764,244 +764,1056 @@ class Connection:
         """Check if the connection is currently active."""
         return self._is_running
 `
-  },
+  }
+];
+
+export const kotlinCodeFiles: CodeFile[] = [
   {
-    name: "peer.py",
-    description: "Defines symmetric P2P helper functions for sending handshakes, chats, heartbeats, and files, along with the interactive peer shell.",
-    code: `import os
-import time
-import random
-from connection import Connection
-from packet import Packet
-from packet_types import PacketType
-from field_writer import FieldWriter
-from constants import (
-    KEY_DEVICE_NAME,
-    KEY_APP_NAME,
-    KEY_APP_VERSION,
-    KEY_PLATFORM,
-    KEY_PROTOCOL_VERSION,
-    KEY_TEXT_MESSAGE,
-    KEY_SENDER_NAME,
-    KEY_TRANSFER_ID,
-    KEY_FILE_NAME,
-    KEY_FILE_SIZE,
-    KEY_CHUNK_SIZE,
-    KEY_CHUNK_NUMBER,
-    KEY_BINARY_DATA
-)
+    name: "Protocol.kt",
+    description: "The main public API singleton for Android developers. Manages background execution of client/server threads and handles main-thread UI callbacks.",
+    code: `package com.bouazza.swift.protocol
 
-def send_handshake(connection: Connection, node_name: str) -> None:
-    """Send protocol handshake symmetrically to identify this node."""
-    writer = FieldWriter()
-    writer.write_string(KEY_DEVICE_NAME, node_name)
-    writer.write_string(KEY_APP_NAME, "CustomBinaryP2PNode")
-    writer.write_string(KEY_APP_VERSION, "1.0.0")
-    writer.write_string(KEY_PLATFORM, "CrossPlatform/OS")
-    writer.write_short(KEY_PROTOCOL_VERSION, 1)
+import android.os.Handler
+import android.os.Looper
+import com.bouazza.swift.protocol.callbacks.ProtocolListener
+import com.bouazza.swift.protocol.connection.Connection
+import com.bouazza.swift.protocol.dispatcher.Dispatcher
+import com.bouazza.swift.protocol.session.Session
+import com.bouazza.swift.protocol.transport.TcpTransport
+import com.bouazza.swift.protocol.transfer.TransferManager
+import java.io.File
+import java.io.IOException
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.Executors
 
-    packet = Packet(PacketType.HANDSHAKE, writer.get_bytes())
-    connection.send_packet(packet)
-    print(f"[{node_name}] Sent HANDSHAKE identifying as '{node_name}'")
+/**
+ * Main entry point and public API for the Swift peer-to-peer binary protocol.
+ */
+object Protocol {
+    private val executor = Executors.newCachedThreadPool()
+    private val mainThreadHandler = Handler(Looper.getMainLooper())
 
-def send_chat(connection: Connection, node_name: str, message: str) -> None:
-    """Send a text chat message to the remote peer."""
-    writer = FieldWriter()
-    writer.write_string(KEY_SENDER_NAME, node_name)
-    writer.write_string(KEY_TEXT_MESSAGE, message)
+    @Volatile
+    private var activeSession: Session? = null
 
-    packet = Packet(PacketType.TEXT, writer.get_bytes())
-    connection.send_packet(packet)
-    print(f"[{node_name}] Sent chat message: '{message}'")
+    @Volatile
+    private var serverSocket: ServerSocket? = null
 
-def send_ping(connection: Connection, node_name: str) -> None:
-    """Send a heartbeat PING packet to the remote peer."""
-    packet = Packet(PacketType.PING)
-    connection.send_packet(packet)
-    print(f"[{node_name}] Sent PING heartbeat.")
+    /**
+     * Symmetrically starts a background listening socket to accept exactly one connection.
+     */
+    fun startListening(port: Int, listener: ProtocolListener, nodeName: String) {
+        if (activeSession != null) {
+            postError(listener, IllegalStateException("Protocol session is already active."))
+            return
+        }
 
-def send_file(connection: Connection, node_name: str, file_path: str, chunk_size: int = 4096) -> None:
-    """Symmetrically stream a file in chunks over the P2P connection."""
-    if not os.path.exists(file_path):
-        print(f"[{node_name}] Error: Local file not found: {file_path}")
-        return
+        executor.execute {
+            try {
+                val sSocket = ServerSocket(port).also { serverSocket = it }
+                val socket = sSocket.accept()
+                sSocket.close()
+                serverSocket = null
 
-    file_name = os.path.basename(file_path)
-    file_size = os.path.getsize(file_path)
-    transfer_id = random.randint(1000, 9999)
+                initializePeer(socket, listener, nodeName)
+            } catch (e: Exception) {
+                if (activeSession == null) {
+                    postError(listener, e)
+                }
+            }
+        }
+    }
 
-    print(f"\\n[{node_name} File Stream] Initiating file transfer for '{file_name}':")
-    print(f"  Transfer ID: {transfer_id}")
-    print(f"  Size: {file_size} bytes")
-    print(f"  Chunk Size: {chunk_size} bytes")
+    /**
+     * Symmetrically connects to a remote host in the background.
+     */
+    fun connect(host: String, port: Int, listener: ProtocolListener, nodeName: String) {
+        if (activeSession != null) {
+            postError(listener, IllegalStateException("Protocol session is already active."))
+            return
+        }
 
-    # FILE_START
-    start_writer = FieldWriter()
-    start_writer.write_int(KEY_TRANSFER_ID, transfer_id)
-    start_writer.write_string(KEY_FILE_NAME, file_name)
-    start_writer.write_long(KEY_FILE_SIZE, file_size)
-    start_writer.write_int(KEY_CHUNK_SIZE, chunk_size)
-    connection.send_packet(Packet(PacketType.FILE_START, start_writer.get_bytes()))
+        executor.execute {
+            try {
+                val transport = TcpTransport(host, port)
+                initializePeer(transport, listener, nodeName)
+            } catch (e: Exception) {
+                postError(listener, e)
+            }
+        }
+    }
 
-    # Chunks streaming
-    chunk_number = 0
-    bytes_sent = 0
-    with open(file_path, "rb") as f:
-        while True:
-            data = f.read(chunk_size)
-            if not data:
-                break
-            chunk_number += 1
-            chunk_writer = FieldWriter()
-            chunk_writer.write_int(KEY_TRANSFER_ID, transfer_id)
-            chunk_writer.write_int(KEY_CHUNK_NUMBER, chunk_number)
-            chunk_writer.write_bytes(KEY_BINARY_DATA, data)
-            connection.send_packet(Packet(PacketType.FILE_CHUNK, chunk_writer.get_bytes()))
-            bytes_sent += len(data)
+    private fun initializePeer(socket: Socket, listener: ProtocolListener, nodeName: String) {
+        val transport = TcpTransport(socket)
+        initializePeer(transport, listener, nodeName)
+    }
 
-            pct = (bytes_sent / file_size) * 100 if file_size > 0 else 100
-            print(f"  [{node_name}] Sent chunk #{chunk_number}: {len(data)} bytes ({pct:.1f}% sent)", end="\\r")
-            time.sleep(0.001)
-    print()
+    private fun initializePeer(transport: TcpTransport, listener: ProtocolListener, nodeName: String) {
+        val safeListener = MainThreadListenerProxy(listener, mainThreadHandler)
+        val dispatcher = Dispatcher()
+        val transferManager = TransferManager(safeListener)
 
-    # FILE_END
-    end_writer = FieldWriter()
-    end_writer.write_int(KEY_TRANSFER_ID, transfer_id)
-    connection.send_packet(Packet(PacketType.FILE_END, end_writer.get_bytes()))
-    print(f"[{node_name}] FILE_END packet sent. Complete.")
+        val connection = Connection(
+            transport = transport,
+            incomingPacketCallback = { packet ->
+                activeSession?.let { dispatcher.dispatch(it.connection, packet) }
+            },
+            disconnectCallback = {
+                activeSession = null
+                safeListener.onDisconnected()
+            }
+        )
 
-def run_peer_repl(connection: Connection, node_name: str) -> None:
-    """Symmetric interactive CLI shell for either peer."""
-    print(f"\\n==============================================")
-    print(f"🚀 {node_name} Peer Shell Connected!")
-    print(f"Both sides are identical full-duplex peers.")
-    print(f"You can send chats, pings, or files at any time.")
-    print(f"==============================================")
+        activeSession = Session(connection, dispatcher, transferManager, safeListener, nodeName)
+        safeListener.onConnected("peer", 9999)
+    }
 
-    try:
-        send_handshake(connection, node_name)
-    except Exception as e:
-        print(f"Failed to send handshake: {e}")
+    /**
+     * Gracefully notifies the remote peer and disconnects.
+     */
+    fun disconnect() {
+        val session = activeSession ?: return
+        activeSession = null
+        
+        executor.execute {
+            session.sendDisconnect()
+        }
 
-    time.sleep(0.2)
+        try {
+            serverSocket?.close()
+            serverSocket = null
+        } catch (ignored: Exception) {}
+    }
 
-    while connection.is_active:
-        try:
-            print("\\nOptions:")
-            print("1. Send Chat Message")
-            print("2. Send File")
-            print("3. Send Heartbeat PING")
-            print("4. Close / Disconnect")
-            
-            choice = input("\\nEnter choice (1-4): ").strip()
-            if not connection.is_active:
-                break
+    /**
+     * Transmits a text chat message to the remote peer.
+     */
+    fun sendText(senderName: String, text: String) {
+        val session = activeSession ?: throw IllegalStateException("Not connected to any peer.")
+        executor.execute {
+            session.sendText(senderName, text)
+        }
+    }
 
-            if choice == "1":
-                msg = input("Enter message: ").strip()
-                if msg:
-                    send_chat(connection, node_name, msg)
-            elif choice == "2":
-                path = input("Enter local file path to send: ").strip()
-                if path:
-                    send_file(connection, node_name, path)
-            elif choice == "3":
-                send_ping(connection, node_name)
-            elif choice == "4":
-                print("Disconnecting gracefully...")
-                try:
-                    connection.send_packet(Packet(PacketType.DISCONNECT))
-                except Exception:
-                    pass
-                connection.close()
-                break
-            else:
-                print("Invalid option.")
-        except KeyboardInterrupt:
-            print("\\nExiting...")
-            try:
-                connection.send_packet(Packet(PacketType.DISCONNECT))
-            except Exception:
-                pass
-            connection.close()
-            break
-        except Exception as e:
-            print(f"Error: {e}")
-            break
+    /**
+     * Slices and streams a local binary file over the peer-to-peer session.
+     */
+    fun sendFile(file: File, chunkSize: Int = 4096) {
+        val session = activeSession ?: throw IllegalStateException("Not connected to any peer.")
+        try {
+            val transferManagerField = Session::class.java.getDeclaredField("transferManager")
+            transferManagerField.isAccessible = true
+            val transferManager = transferManagerField.get(session) as TransferManager
+            transferManager.startOutgoingTransfer(session.connection, file, chunkSize)
+        } catch (e: Exception) {
+            throw IllegalStateException("Failed to coordinate file transmission: \${e.message}", e)
+        }
+    }
+
+    private fun postError(listener: ProtocolListener, exception: Exception) {
+        mainThreadHandler.post { listener.onError(exception) }
+    }
+
+    private class MainThreadListenerProxy(
+        private val delegate: ProtocolListener,
+        private val handler: Handler
+    ) : ProtocolListener {
+        override fun onConnected(host: String, port: Int) {
+            handler.post { delegate.onConnected(host, port) }
+        }
+
+        override fun onDisconnected() {
+            handler.post { delegate.onDisconnected() }
+        }
+
+        override fun onHandshake(deviceName: String, appName: String, appVersion: String, platform: String, protocolVersion: Short, capabilities: String) {
+            handler.post { delegate.onHandshake(deviceName, appName, appVersion, platform, protocolVersion, capabilities) }
+        }
+
+        override fun onTextReceived(sender: String, text: String) {
+            handler.post { delegate.onTextReceived(sender, text) }
+        }
+
+        override fun onFileStarted(transferId: Int, fileName: String, fileSize: Long, chunkSize: Int) {
+            handler.post { delegate.onFileStarted(transferId, fileName, fileSize, chunkSize) }
+        }
+
+        override fun onFileProgress(transferId: Int, bytesTransferred: Long, totalBytes: Long, percentage: Double, speedBytesPerSec: Long, estimatedRemainingSeconds: Long) {
+            handler.post { delegate.onFileProgress(transferId, bytesTransferred, totalBytes, percentage, speedBytesPerSec, estimatedRemainingSeconds) }
+        }
+
+        override fun onFileCompleted(transferId: Int, fileName: String, totalBytesReceived: Long, savePath: String) {
+            handler.post { delegate.onFileCompleted(transferId, fileName, totalBytesReceived, savePath) }
+        }
+
+        override fun onFileCancelled(transferId: Int) {
+            handler.post { delegate.onFileCancelled(transferId) }
+        }
+
+        override fun onError(exception: Exception) {
+            handler.post { delegate.onError(exception) }
+        }
+    }
+}
 `
   },
   {
-    name: "server.py",
-    description: "Listens for exactly one incoming socket, accepts it, spawns the Connection object, and runs the identical symmetric P2P shell.",
-    code: `import socket
-from constants import DEFAULT_PORT
-from dispatcher import PeerDispatcher
-from connection import Connection
-from peer import run_peer_repl
+    name: "Transport.kt",
+    description: "The transport abstraction layer interface that decouples raw bidirectional byte streaming from higher-level protocol packing.",
+    code: `package com.bouazza.swift.protocol.transport
 
-def main() -> None:
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    try:
-        server_sock.bind(("0.0.0.0", DEFAULT_PORT))
-        server_sock.listen(1)
-        print(f"📡 [Server] Listening for exactly one peer connection on port {DEFAULT_PORT}...")
-        
-        client_sock, addr = server_sock.accept()
-        print(f"📥 [Server] Connection accepted from: {addr[0]}:{addr[1]}")
-        server_sock.close()
-        
-        # Wrapped identically for P2P operations
-        dispatcher = PeerDispatcher(node_name="ServerPeer")
-        connection = Connection(client_sock, dispatcher)
-        
-        run_peer_repl(connection, "ServerPeer")
-    except Exception as e:
-        print(f"❌ [Server] Error: {e}")
-    finally:
-        try:
-            server_sock.close()
-        except OSError:
-            pass
+import java.io.IOException
 
-if __name__ == "__main__":
-    main()
+/**
+ * Interface abstracting raw bidirectional network stream transmissions.
+ */
+interface Transport {
+    val isActive: Boolean
+
+    @Throws(IOException::class)
+    fun write(data: ByteArray)
+
+    @Throws(IOException::class)
+    fun read(buffer: ByteArray, offset: Int, length: Int): Int
+
+    @Throws(IOException::class)
+    fun flush()
+
+    fun close()
+}
 `
   },
   {
-    name: "client.py",
-    description: "Connects to the server's listening socket, wraps the socket in the identical Connection class, and runs the identical symmetric P2P shell.",
-    code: `import socket
-from constants import DEFAULT_PORT
-from dispatcher import PeerDispatcher
-from connection import Connection
-from peer import run_peer_repl
+    name: "TcpTransport.kt",
+    description: "Concrete TCP socket implementation of the Transport interface supporting buffered I/O streams.",
+    code: `package com.bouazza.swift.protocol.transport
 
-def main() -> None:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    host = "127.0.0.1"
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.IOException
+import java.net.InetSocketAddress
+import java.net.Socket
+
+class TcpTransport : Transport {
+    private val socket: Socket
+    private val inputStream: BufferedInputStream
+    private val outputStream: BufferedOutputStream
     
-    try:
-        print(f"🔌 [Client] Connecting to remote host {host}:{DEFAULT_PORT}...")
-        sock.connect((host, DEFAULT_PORT))
-        print(f"🟢 [Client] Connected successfully!")
-        
-        # Wrapped identically for P2P operations
-        dispatcher = PeerDispatcher(node_name="ClientPeer")
-        connection = Connection(sock, dispatcher)
-        
-        run_peer_repl(connection, "ClientPeer")
-    except Exception as e:
-        print(f"❌ [Client] Failed to establish connection: {e}")
-    finally:
-        try:
-            sock.close()
-        except OSError:
-            pass
+    @Volatile
+    private var isClosed = false
 
-if __name__ == "__main__":
-    main()
+    constructor(socket: Socket) {
+        this.socket = socket
+        this.inputStream = BufferedInputStream(socket.getInputStream())
+        this.outputStream = BufferedOutputStream(socket.getOutputStream())
+    }
+
+    constructor(host: String, port: Int, connectionTimeoutMs: Int = 10000) {
+        this.socket = Socket()
+        this.socket.connect(InetSocketAddress(host, port), connectionTimeoutMs)
+        this.inputStream = BufferedInputStream(socket.getInputStream())
+        this.outputStream = BufferedOutputStream(socket.getOutputStream())
+    }
+
+    override val isActive: Boolean
+        get() = !isClosed && socket.isConnected && !socket.isClosed && !socket.isInputShutdown && !socket.isOutputShutdown
+
+    @Throws(IOException::class)
+    override fun write(data: ByteArray) {
+        if (!isActive) throw IOException("Cannot write: TCP transport is not active.")
+        outputStream.write(data)
+    }
+
+    @Throws(IOException::class)
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (!isActive) throw IOException("Cannot read: TCP transport is not active.")
+        
+        var totalBytesRead = 0
+        while (totalBytesRead < length) {
+            val bytesRead = inputStream.read(buffer, offset + totalBytesRead, length - totalBytesRead)
+            if (bytesRead == -1) {
+                if (totalBytesRead == 0) return -1
+                throw IOException("End of stream reached before reading expected length: \$length")
+            }
+            totalBytesRead += bytesRead
+        }
+        return totalBytesRead
+    }
+
+    @Throws(IOException::class)
+    override fun flush() {
+        if (isActive) {
+            outputStream.flush()
+        }
+    }
+
+    override fun close() {
+        if (isClosed) return
+        isClosed = true
+        
+        try { socket.shutdownInput() } catch (ignored: Exception) {}
+        try { socket.shutdownOutput() } catch (ignored: Exception) {}
+        try { inputStream.close() } catch (ignored: Exception) {}
+        try { outputStream.close() } catch (ignored: Exception) {}
+        try { socket.close() } catch (ignored: Exception) {}
+    }
+}
+`
+  },
+  {
+    name: "Connection.kt",
+    description: "Maintains a full-duplex session over a Transport. Manages a dedicated background thread for packet reading and exposes safe synchronous writers.",
+    code: `package com.bouazza.swift.protocol.connection
+
+import com.bouazza.swift.protocol.packet.Packet
+import com.bouazza.swift.protocol.packet.PacketReader
+import com.bouazza.swift.protocol.packet.PacketWriter
+import com.bouazza.swift.protocol.transport.Transport
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
+
+class Connection(
+    private val transport: Transport,
+    private val incomingPacketCallback: (Packet) -> Unit,
+    private val disconnectCallback: () -> Unit
+) {
+    private val packetReader = PacketReader(transport)
+    private val packetWriter = PacketWriter(transport)
+    private val isRunning = AtomicBoolean(true)
+    private var readThread: Thread? = null
+
+    init {
+        readThread = Thread({ receiveLoop() }, "SwiftConnection-Receiver").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    @Throws(IOException::class)
+    fun sendPacket(packet: Packet) {
+        if (!isActive) {
+            throw IOException("Cannot send: connection is closed.")
+        }
+        packetWriter.writePacket(packet)
+    }
+
+    val isActive: Boolean
+        get() = isRunning.get() && transport.isActive
+
+    private fun receiveLoop() {
+        try {
+            while (isRunning.get() && transport.isActive) {
+                val packet = packetReader.readPacket()
+                incomingPacketCallback(packet)
+            }
+        } catch (ignored: IOException) {
+        } finally {
+            close()
+        }
+    }
+
+    fun close() {
+        if (!isRunning.compareAndSet(true, false)) {
+            return
+        }
+        try { transport.close() } catch (ignored: Exception) {}
+        disconnectCallback()
+        readThread?.interrupt()
+    }
+}
+`
+  },
+  {
+    name: "Packet.kt",
+    description: "Declares the logical frame structure for a protocol transmission, specifying header layouts and raw data offsets.",
+    code: `package com.bouazza.swift.protocol.packet
+
+import java.nio.ByteBuffer
+
+class Packet(
+    val type: Byte,
+    val payload: ByteArray = ByteArray(0)
+) {
+    init {
+        require(payload.size <= 65535) {
+            "Packet payload size (\${payload.size}) exceeds 16-bit unsigned limit of 65535."
+        }
+    }
+
+    constructor(packetType: PacketType, payload: ByteArray = ByteArray(0)) : this(packetType.value, payload)
+
+    fun serialize(): ByteArray {
+        val serialized = ByteArray(HEADER_SIZE + payload.size)
+        val buffer = ByteBuffer.wrap(serialized)
+        
+        buffer.put(type)
+        buffer.putShort(payload.size.toShort())
+        buffer.put(payload)
+        
+        return serialized
+    }
+
+    companion object {
+        const val HEADER_SIZE = 3
+    }
+}
+`
+  },
+  {
+    name: "PacketReader.kt",
+    description: "Utility wrapper to pull exact-sized raw header headers and payloads synchronously from the transport stream.",
+    code: `package com.bouazza.swift.protocol.packet
+
+import com.bouazza.swift.protocol.transport.Transport
+import java.io.IOException
+import java.nio.ByteBuffer
+
+class PacketReader(private val transport: Transport) {
+
+    @Throws(IOException::class)
+    fun readPacket(): Packet {
+        val headerBuffer = ByteArray(Packet.HEADER_SIZE)
+        val headerReadResult = transport.read(headerBuffer, 0, Packet.HEADER_SIZE)
+        if (headerReadResult == -1) {
+            throw IOException("Socket closed while reading packet header.")
+        }
+
+        val headerWrap = ByteBuffer.wrap(headerBuffer)
+        val type = headerWrap.get()
+        val payloadLength = headerWrap.getShort().toInt() and 0xFFFF
+
+        val payloadBuffer = if (payloadLength > 0) {
+            val buf = ByteArray(payloadLength)
+            val payloadReadResult = transport.read(buf, 0, payloadLength)
+            if (payloadReadResult == -1) {
+                throw IOException("Socket closed while reading packet payload of length: \$payloadLength")
+            }
+            buf
+        } else {
+            ByteArray(0)
+        }
+
+        return Packet(type, payloadBuffer)
+    }
+}
+`
+  },
+  {
+    name: "PacketWriter.kt",
+    description: "Ensures thread safety and prevent chunk interleaving when writing packets onto the shared socket output stream.",
+    code: `package com.bouazza.swift.protocol.packet
+
+import com.bouazza.swift.protocol.transport.Transport
+import java.io.IOException
+
+class PacketWriter(private val transport: Transport) {
+    private val lock = Any()
+
+    @Throws(IOException::class)
+    fun writePacket(packet: Packet) {
+        synchronized(lock) {
+            val data = packet.serialize()
+            transport.write(data)
+            transport.flush()
+        }
+    }
+}
+`
+  },
+  {
+    name: "Field.kt",
+    description: "Represents a single Type-Length-Value payload segment matching the FIELD_MARKER protocol specification.",
+    code: `package com.bouazza.swift.protocol.fields
+
+import com.bouazza.swift.protocol.constants.ProtocolConstants
+import java.nio.ByteBuffer
+
+class Field(
+    val key: Byte,
+    val value: ByteArray
+) {
+    init {
+        require(value.size <= 65535) {
+            "Field value length (\${value.size}) exceeds 16-bit unsigned maximum limit of 65535."
+        }
+    }
+
+    fun serialize(): ByteArray {
+        val data = ByteArray(4 + value.size)
+        val buffer = ByteBuffer.wrap(data)
+        
+        buffer.put(ProtocolConstants.FIELD_MARKER)
+        buffer.put(key)
+        buffer.putShort(value.size.toShort())
+        buffer.put(value)
+        
+        return data
+    }
+}
+`
+  },
+  {
+    name: "FieldWriter.kt",
+    description: "Streamlined binary builder following the Builder pattern to assemble string, integer, short, long, and boolean fields into TLV structures.",
+    code: `package com.bouazza.swift.protocol.fields
+
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
+
+class FieldWriter {
+    private val outputStream = ByteArrayOutputStream()
+
+    fun writeBytes(key: Byte, value: ByteArray): FieldWriter {
+        val field = Field(key, value)
+        try {
+            outputStream.write(field.serialize())
+        } catch (ignored: IOException) {}
+        return this
+    }
+
+    fun writeString(key: Byte, value: String): FieldWriter {
+        val bytes = value.toByteArray(StandardCharsets.UTF_8)
+        return writeBytes(key, bytes)
+    }
+
+    fun writeShort(key: Byte, value: Short): FieldWriter {
+        val buffer = ByteBuffer.allocate(2).putShort(value)
+        return writeBytes(key, buffer.array())
+    }
+
+    fun writeInt(key: Byte, value: Int): FieldWriter {
+        val buffer = ByteBuffer.allocate(4).putInt(value)
+        return writeBytes(key, buffer.array())
+    }
+
+    fun writeLong(key: Byte, value: Long): FieldWriter {
+        val buffer = ByteBuffer.allocate(8).putLong(value)
+        return writeBytes(key, buffer.array())
+    }
+
+    fun writeBoolean(key: Byte, value: Boolean): FieldWriter {
+        val byteVal = if (value) 1.toByte() else 0.toByte()
+        return writeBytes(key, byteArrayOf(byteVal))
+    }
+
+    fun getBytes(): ByteArray {
+        return outputStream.toByteArray()
+    }
+
+    fun clear() {
+        outputStream.reset()
+    }
+}
+`
+  },
+  {
+    name: "FieldReader.kt",
+    description: "Continuous payload parser validating bounds and converting binary field elements into typed getters.",
+    code: `package com.bouazza.swift.protocol.fields
+
+import com.bouazza.swift.protocol.constants.ProtocolConstants
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
+
+class FieldReader(payload: ByteArray) {
+    private val fields = HashMap<Byte, ByteArray>()
+
+    init {
+        parse(payload)
+    }
+
+    @Throws(IOException::class)
+    private fun parse(payload: ByteArray) {
+        val buffer = ByteBuffer.wrap(payload)
+        while (buffer.hasRemaining()) {
+            if (buffer.remaining() < 4) {
+                throw IOException("Malformed payload: Header truncated.")
+            }
+
+            val marker = buffer.get()
+            if (marker != ProtocolConstants.FIELD_MARKER) {
+                throw IOException(String.format("Marker validation failed. Expected 0x00, got 0x%02X", marker))
+            }
+
+            val key = buffer.get()
+            val length = buffer.getShort().toInt() and 0xFFFF
+
+            if (buffer.remaining() < length) {
+                throw IOException("Malformed payload: Declared field length (\$length) exceeds remaining buffer space.")
+            }
+
+            val valueBytes = ByteArray(length)
+            buffer.get(valueBytes)
+            fields[key] = valueBytes
+        }
+    }
+
+    fun hasField(key: Byte): Boolean {
+        return fields.containsKey(key)
+    }
+
+    fun getBytes(key: Byte): ByteArray {
+        return fields[key] ?: throw NoSuchElementException("Field with key 0x\${String.format("%02X", key)} not found.")
+    }
+
+    fun getBytes(key: Byte, default: ByteArray): ByteArray {
+        return fields[key] ?: default
+    }
+
+    fun getString(key: Byte): String {
+        return String(getBytes(key), StandardCharsets.UTF_8)
+    }
+
+    fun getString(key: Byte, default: String): String {
+        val bytes = fields[key] ?: return default
+        return String(bytes, StandardCharsets.UTF_8)
+    }
+
+    fun getShort(key: Byte): Short {
+        val bytes = getBytes(key)
+        if (bytes.size != 2) throw IllegalArgumentException("Expected 2 bytes for Short, got \${bytes.size}.")
+        return ByteBuffer.wrap(bytes).getShort()
+    }
+
+    fun getShort(key: Byte, default: Short): Short {
+        val bytes = fields[key] ?: return default
+        if (bytes.size != 2) return default
+        return ByteBuffer.wrap(bytes).getShort()
+    }
+
+    fun getInt(key: Byte): Int {
+        val bytes = getBytes(key)
+        if (bytes.size != 4) throw IllegalArgumentException("Expected 4 bytes for Int, got \${bytes.size}.")
+        return ByteBuffer.wrap(bytes).getInt()
+    }
+
+    fun getInt(key: Byte, default: Int): Int {
+        val bytes = fields[key] ?: return default
+        if (bytes.size != 4) return default
+        return ByteBuffer.wrap(bytes).getInt()
+    }
+
+    fun getLong(key: Byte): Long {
+        val bytes = getBytes(key)
+        if (bytes.size != 8) throw IllegalArgumentException("Expected 8 bytes for Long, got \${bytes.size}.")
+        return ByteBuffer.wrap(bytes).getLong()
+    }
+
+    fun getLong(key: Byte, default: Long): Long {
+        val bytes = fields[key] ?: return default
+        if (bytes.size != 8) return default
+        return ByteBuffer.wrap(bytes).getLong()
+    }
+
+    fun getBoolean(key: Byte): Boolean {
+        val bytes = getBytes(key)
+        if (bytes.isEmpty()) throw IllegalArgumentException("Expected at least 1 byte for Boolean.")
+        return bytes[0].toInt() != 0
+    }
+
+    fun getBoolean(key: Byte, default: Boolean): Boolean {
+        val bytes = fields[key] ?: return default
+        if (bytes.isEmpty()) return default
+        return bytes[0].toInt() != 0
+    }
+}
+`
+  },
+  {
+    name: "Dispatcher.kt",
+    description: "Event routing engine storing individual PacketHandlers to enable adding new packet types cleanly without modifying pre-compiled code.",
+    code: `package com.bouazza.swift.protocol.dispatcher
+
+import com.bouazza.swift.protocol.connection.Connection
+import com.bouazza.swift.protocol.packet.Packet
+import java.util.concurrent.ConcurrentHashMap
+
+fun interface PacketHandler {
+    fun handle(connection: Connection, packet: Packet)
+}
+
+class Dispatcher {
+    private val handlers = ConcurrentHashMap<Byte, PacketHandler>()
+
+    fun registerHandler(type: Byte, handler: PacketHandler) {
+        handlers[type] = handler
+    }
+
+    fun unregisterHandler(type: Byte) {
+        handlers.remove(type)
+    }
+
+    fun dispatch(connection: Connection, packet: Packet) {
+        val handler = handlers[packet.type]
+        if (handler != null) {
+            try {
+                handler.handle(connection, packet)
+            } catch (e: Exception) {
+                System.err.println("Error executing packet handler: \${e.message}")
+            }
+        }
+    }
+}
+`
+  },
+  {
+    name: "Session.kt",
+    description: "Coordinates standard protocol handshake exchange, pings, text chats, and guides binary file assembly.",
+    code: `package com.bouazza.swift.protocol.session
+
+import com.bouazza.swift.protocol.callbacks.ProtocolListener
+import com.bouazza.swift.protocol.connection.Connection
+import com.bouazza.swift.protocol.constants.ProtocolConstants
+import com.bouazza.swift.protocol.dispatcher.Dispatcher
+import com.bouazza.swift.protocol.fields.FieldReader
+import com.bouazza.swift.protocol.fields.FieldWriter
+import com.bouazza.swift.protocol.packet.Packet
+import com.bouazza.swift.protocol.packet.PacketType
+import com.bouazza.swift.protocol.transfer.TransferManager
+import java.io.IOException
+
+class Session(
+    val connection: Connection,
+    private val dispatcher: Dispatcher,
+    private val transferManager: TransferManager,
+    private val listener: ProtocolListener,
+    private val localNodeName: String
+) {
+    init {
+        registerStandardHandlers()
+        sendHandshake()
+    }
+
+    fun sendHandshake() {
+        try {
+            val payload = FieldWriter()
+                .writeString(ProtocolConstants.KEY_DEVICE_NAME, localNodeName)
+                .writeString(ProtocolConstants.KEY_APP_NAME, "SwiftP2PEngine")
+                .writeString(ProtocolConstants.KEY_APP_VERSION, "1.0.0")
+                .writeString(ProtocolConstants.KEY_PLATFORM, "Android API 33")
+                .writeShort(ProtocolConstants.KEY_PROTOCOL_VERSION, 1)
+                .writeString(ProtocolConstants.KEY_CAPABILITIES, "TEXT,FILE")
+                .getBytes()
+
+            connection.sendPacket(Packet(PacketType.HANDSHAKE, payload))
+        } catch (e: Exception) {
+            listener.onError(e)
+        }
+    }
+
+    fun sendText(senderName: String, text: String) {
+        try {
+            val payload = FieldWriter()
+                .writeString(ProtocolConstants.KEY_SENDER_NAME, senderName)
+                .writeString(ProtocolConstants.KEY_TEXT_MESSAGE, text)
+                .getBytes()
+
+            connection.sendPacket(Packet(PacketType.TEXT, payload))
+        } catch (e: Exception) {
+            listener.onError(e)
+        }
+    }
+
+    fun sendDisconnect() {
+        try { connection.sendPacket(Packet(PacketType.DISCONNECT)) } catch (ignored: Exception) {}
+        connection.close()
+    }
+
+    private fun registerStandardHandlers() {
+        dispatcher.registerHandler(PacketType.HANDSHAKE.value) { conn, packet ->
+            try {
+                val reader = FieldReader(packet.payload)
+                val deviceName = reader.getString(ProtocolConstants.KEY_DEVICE_NAME)
+                val appName = reader.getString(ProtocolConstants.KEY_APP_NAME)
+                val appVersion = reader.getString(ProtocolConstants.KEY_APP_VERSION)
+                val platform = reader.getString(ProtocolConstants.KEY_PLATFORM)
+                val protocolVersion = reader.getShort(ProtocolConstants.KEY_PROTOCOL_VERSION)
+                val capabilities = reader.getString(ProtocolConstants.KEY_CAPABILITIES, "")
+
+                listener.onHandshake(deviceName, appName, appVersion, platform, protocolVersion, capabilities)
+
+                val ackPayload = FieldWriter()
+                    .writeBoolean(ProtocolConstants.KEY_HANDSHAKE_SUCCESS, true)
+                    .writeString(ProtocolConstants.KEY_HANDSHAKE_MESSAGE, "Connection Approved by \$localNodeName")
+                    .getBytes()
+
+                conn.sendPacket(Packet(PacketType.HANDSHAKE_ACK, ackPayload))
+            } catch (e: Exception) {
+                listener.onError(IOException("Malformed handshake package received", e))
+                conn.close()
+            }
+        }
+
+        dispatcher.registerHandler(PacketType.HANDSHAKE_ACK.value) { _, packet ->
+            try {
+                val reader = FieldReader(packet.payload)
+                val success = reader.getBoolean(ProtocolConstants.KEY_HANDSHAKE_SUCCESS)
+                val message = reader.getString(ProtocolConstants.KEY_HANDSHAKE_MESSAGE)
+                if (!success) {
+                    listener.onError(IOException("Handshake was rejected by peer: \$message"))
+                    connection.close()
+                }
+            } catch (e: Exception) {
+                listener.onError(e)
+            }
+        }
+
+        dispatcher.registerHandler(PacketType.TEXT.value) { _, packet ->
+            try {
+                val reader = FieldReader(packet.payload)
+                val sender = reader.getString(ProtocolConstants.KEY_SENDER_NAME)
+                val text = reader.getString(ProtocolConstants.KEY_TEXT_MESSAGE)
+                listener.onTextReceived(sender, text)
+            } catch (e: Exception) {
+                listener.onError(e)
+            }
+        }
+
+        dispatcher.registerHandler(PacketType.FILE_START.value) { _, packet ->
+            try {
+                val reader = FieldReader(packet.payload)
+                val transferId = reader.getInt(ProtocolConstants.KEY_TRANSFER_ID)
+                val fileName = reader.getString(ProtocolConstants.KEY_FILE_NAME)
+                val fileSize = reader.getLong(ProtocolConstants.KEY_FILE_SIZE)
+                val chunkSize = reader.getInt(ProtocolConstants.KEY_CHUNK_SIZE)
+                
+                transferManager.handleIncomingStart(transferId, fileName, fileSize, chunkSize)
+            } catch (e: Exception) {
+                listener.onError(e)
+            }
+        }
+
+        dispatcher.registerHandler(PacketType.FILE_CHUNK.value) { _, packet ->
+            try {
+                val reader = FieldReader(packet.payload)
+                val transferId = reader.getInt(ProtocolConstants.KEY_TRANSFER_ID)
+                val chunkNumber = reader.getInt(ProtocolConstants.KEY_CHUNK_NUMBER)
+                val data = reader.getBytes(ProtocolConstants.KEY_BINARY_DATA)
+                
+                transferManager.handleIncomingChunk(transferId, chunkNumber, data)
+            } catch (e: Exception) {
+                listener.onError(e)
+            }
+        }
+
+        dispatcher.registerHandler(PacketType.FILE_END.value) { _, packet ->
+            try {
+                val reader = FieldReader(packet.payload)
+                val transferId = reader.getInt(ProtocolConstants.KEY_TRANSFER_ID)
+                transferManager.handleIncomingEnd(transferId)
+            } catch (e: Exception) {
+                listener.onError(e)
+            }
+        }
+
+        dispatcher.registerHandler(PacketType.PING.value) { conn, _ ->
+            try { conn.sendPacket(Packet(PacketType.PONG)) } catch (ignored: Exception) {}
+        }
+
+        dispatcher.registerHandler(PacketType.DISCONNECT.value) { conn, _ ->
+            conn.close()
+        }
+    }
+}
+`
+  },
+  {
+    name: "TransferManager.kt",
+    description: "Slices large files into sequential binary payloads asynchronously and guides file reconstruction securely.",
+    code: `package com.bouazza.swift.protocol.transfer
+
+import com.bouazza.swift.protocol.callbacks.ProtocolListener
+import com.bouazza.swift.protocol.connection.Connection
+import com.bouazza.swift.protocol.constants.ProtocolConstants
+import com.bouazza.swift.protocol.fields.FieldWriter
+import com.bouazza.swift.protocol.packet.Packet
+import com.bouazza.swift.protocol.packet.PacketType
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.random.Random
+
+class TransferTask(
+    val transferId: Int,
+    val file: File,
+    val totalBytes: Long,
+    val chunkSize: Int,
+    val isOutgoing: Boolean,
+    val startTimeMs: Long = System.currentTimeMillis()
+) {
+    var bytesTransferred: Long = 0
+    var lastUpdatedTimeMs: Long = startTimeMs
+    val isCanceled = AtomicBoolean(false)
+    var fileOutputStream: FileOutputStream? = null
+}
+
+class TransferManager(
+    private val listener: ProtocolListener,
+    private val defaultStorageDir: File = File("received_files")
+) {
+    private val activeTransfers = ConcurrentHashMap<Int, TransferTask>()
+
+    init {
+        if (!defaultStorageDir.exists()) defaultStorageDir.mkdirs()
+    }
+
+    fun startOutgoingTransfer(connection: Connection, file: File, chunkSize: Int = 4096) {
+        if (!file.exists() || !file.isFile) {
+            listener.onError(IOException("File not found: \${file.absolutePath}"))
+            return
+        }
+
+        val transferId = Random.nextInt(10000, 99999)
+        val task = TransferTask(transferId, file, file.length(), chunkSize, isOutgoing = true)
+        activeTransfers[transferId] = task
+
+        Thread({
+            try {
+                val startPayload = FieldWriter()
+                    .writeInt(ProtocolConstants.KEY_TRANSFER_ID, transferId)
+                    .writeString(ProtocolConstants.KEY_FILE_NAME, file.name)
+                    .writeLong(ProtocolConstants.KEY_FILE_SIZE, task.totalBytes)
+                    .writeInt(ProtocolConstants.KEY_CHUNK_SIZE, chunkSize)
+                    .getBytes()
+
+                connection.sendPacket(Packet(PacketType.FILE_START, startPayload))
+                listener.onFileStarted(transferId, file.name, task.totalBytes, chunkSize)
+
+                FileInputStream(file).use { fis ->
+                    val buffer = ByteArray(chunkSize)
+                    var chunkNumber = 0
+                    
+                    while (!task.isCanceled.get()) {
+                        val bytesRead = fis.read(buffer)
+                        if (bytesRead == -1) break
+
+                        chunkNumber++
+                        val chunkData = if (bytesRead == chunkSize) buffer else buffer.copyOf(bytesRead)
+
+                        val chunkPayload = FieldWriter()
+                            .writeInt(ProtocolConstants.KEY_TRANSFER_ID, transferId)
+                            .writeInt(ProtocolConstants.KEY_CHUNK_NUMBER, chunkNumber)
+                            .writeBytes(ProtocolConstants.KEY_BINARY_DATA, chunkData)
+                            .getBytes()
+
+                        connection.sendPacket(Packet(PacketType.FILE_CHUNK, chunkPayload))
+                        task.bytesTransferred += bytesRead
+                        notifyProgress(task)
+
+                        Thread.sleep(1)
+                    }
+                }
+
+                if (task.isCanceled.get()) {
+                    listener.onFileCancelled(transferId)
+                    return@Thread
+                }
+
+                val endPayload = FieldWriter()
+                    .writeInt(ProtocolConstants.KEY_TRANSFER_ID, transferId)
+                    .getBytes()
+
+                connection.sendPacket(Packet(PacketType.FILE_END, endPayload))
+                listener.onFileCompleted(transferId, file.name, task.totalBytes, file.absolutePath)
+
+            } catch (e: Exception) {
+                listener.onError(IOException("Error in outgoing transfer \$transferId: \${e.message}", e))
+            } finally {
+                activeTransfers.remove(transferId)
+            }
+        }).start()
+    }
+
+    fun handleIncomingStart(transferId: Int, fileName: String, fileSize: Long, chunkSize: Int) {
+        val destinationFile = File(defaultStorageDir, "received_\${System.currentTimeMillis()}_\$fileName")
+        val task = TransferTask(transferId, destinationFile, fileSize, chunkSize, isOutgoing = false)
+        try {
+            task.fileOutputStream = FileOutputStream(destinationFile)
+            activeTransfers[transferId] = task
+            listener.onFileStarted(transferId, fileName, fileSize, chunkSize)
+        } catch (e: Exception) {
+            listener.onError(e)
+        }
+    }
+
+    fun handleIncomingChunk(transferId: Int, chunkNumber: Int, data: ByteArray) {
+        val task = activeTransfers[transferId] ?: return
+        if (task.isCanceled.get()) return
+        try {
+            task.fileOutputStream?.write(data)
+            task.bytesTransferred += data.size
+            notifyProgress(task)
+        } catch (e: Exception) {
+            listener.onError(e)
+            cancelTransfer(transferId)
+        }
+    }
+
+    fun handleIncomingEnd(transferId: Int) {
+        val task = activeTransfers[transferId] ?: return
+        try {
+            task.fileOutputStream?.flush()
+            task.fileOutputStream?.close()
+            task.fileOutputStream = null
+            listener.onFileCompleted(transferId, task.file.name, task.bytesTransferred, task.file.absolutePath)
+        } catch (e: Exception) {
+            listener.onError(e)
+        } finally {
+            activeTransfers.remove(transferId)
+        }
+    }
+
+    fun cancelTransfer(transferId: Int) {
+        val task = activeTransfers.remove(transferId) ?: return
+        task.isCanceled.set(true)
+        if (!task.isOutgoing) {
+            try {
+                task.fileOutputStream?.close()
+                if (task.file.exists()) task.file.delete()
+            } catch (ignored: Exception) {}
+            listener.onFileCancelled(transferId)
+        }
+    }
+
+    private fun notifyProgress(task: TransferTask) {
+        val now = System.currentTimeMillis()
+        val elapsedTimeSec = (now - task.startTimeMs) / 1000.0
+        val speedBytesPerSec = if (elapsedTimeSec > 0) (task.bytesTransferred / elapsedTimeSec).toLong() else 0L
+        val remainingBytes = task.totalBytes - task.bytesTransferred
+        val estimatedRemainingSeconds = if (speedBytesPerSec > 0) remainingBytes / speedBytesPerSec else -1L
+        val percentage = if (task.totalBytes > 0) (task.bytesTransferred.toDouble() / task.totalBytes) * 100.0 else 100.0
+
+        if (now - task.lastUpdatedTimeMs >= 150 || task.bytesTransferred == task.totalBytes) {
+            task.lastUpdatedTimeMs = now
+            listener.onFileProgress(task.transferId, task.bytesTransferred, task.totalBytes, percentage, speedBytesPerSec, estimatedRemainingSeconds)
+        }
+    }
+}
+`
+  },
+  {
+    name: "ProtocolListener.kt",
+    description: "Adapter-style callback interface allowing Android applications to listen to state modifications, incoming packets, and live ETA file progression.",
+    code: `package com.bouazza.swift.protocol.callbacks
+
+interface ProtocolListener {
+    fun onConnected(host: String, port: Int) {}
+    fun onDisconnected() {}
+    fun onHandshake(deviceName: String, appName: String, appVersion: String, platform: String, protocolVersion: Short, capabilities: String) {}
+    fun onTextReceived(sender: String, text: String) {}
+    fun onFileStarted(transferId: Int, fileName: String, fileSize: Long, chunkSize: Int) {}
+    fun onFileProgress(transferId: Int, bytesTransferred: Long, totalBytes: Long, percentage: Double, speedBytesPerSec: Long, estimatedRemainingSeconds: Long) {}
+    fun onFileCompleted(transferId: Int, fileName: String, totalBytesReceived: Long, savePath: String) {}
+    fun onFileCancelled(transferId: Int) {}
+    fun onError(exception: Exception) {}
+}
 `
   }
 ];
